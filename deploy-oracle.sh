@@ -5,7 +5,7 @@ set -e
 # Vectarly - Oracle Cloud VM Remote Deploy
 # ==========================================
 
-TARGET_PORT="${1:-3003}"
+TARGET_PORT="${1:-3004}"
 APP_DIR="${2:-$(pwd)}"
 TARBALL="vectarly.tar.gz"
 
