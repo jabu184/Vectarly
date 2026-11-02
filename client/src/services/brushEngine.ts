@@ -17,7 +17,7 @@ export interface Point2D {
 /**
  * Generates an N-vertex regular polygon approximation of a circle.
  */
-function createCirclePolygon(center: Point2D, radius: number, segments: number = 16): [number, number][] {
+export function createCirclePolygon(center: Point2D, radius: number, segments: number = 16): [number, number][] {
   const ring: [number, number][] = [];
   const safeRadius = Math.max(radius, 0.5);
 

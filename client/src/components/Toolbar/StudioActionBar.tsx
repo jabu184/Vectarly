@@ -21,6 +21,7 @@ import {
   Columns
 } from 'lucide-react';
 import type { CanvasMode, CropType, BrushMode } from '../../hooks/useFabricCanvas';
+import { areColorsMatching } from '../../services/colorUtils';
 
 interface StudioActionBarProps {
   mode: CanvasMode;
@@ -341,7 +342,7 @@ export const StudioActionBar: React.FC<StudioActionBarProps> = ({
                 <span className="text-[10px] font-bold text-slate-500 hidden sm:inline">Layer:</span>
                 <div className="flex items-center gap-1">
                   {colorLayers.map((l) => {
-                    const isSelected = activeBrushColor.toUpperCase() === l.color.toUpperCase();
+                    const isSelected = areColorsMatching(activeBrushColor, l.color);
                     return (
                       <button
                         key={l.color}

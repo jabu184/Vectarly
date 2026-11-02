@@ -5,7 +5,9 @@ import {
   Scissors,
   Move,
   Ruler,
-  Maximize2
+  Maximize2,
+  Trash2,
+  Eye
 } from 'lucide-react';
 import type { CanvasMode, ContextMenuState, SelectionBounds } from '../../hooks/useFabricCanvas';
 import { GenerationProgressOverlay } from './GenerationProgressOverlay';
@@ -42,6 +44,8 @@ interface CanvasViewportProps {
   onSendToBack?: () => void;
   onBringForward?: () => void;
   onSendBackward?: () => void;
+  selectedObject?: any;
+  onRecenterView?: () => void;
   onDeleteSelected?: () => void;
   onDuplicateSelected?: () => void;
   selectedColor?: string | null;
@@ -113,6 +117,8 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
   onSendToBack,
   onBringForward,
   onSendBackward,
+  selectedObject,
+  onRecenterView,
   onDeleteSelected,
   onDuplicateSelected,
   selectedColor,
@@ -152,6 +158,8 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
 }) => {
   const [containerDims, setContainerDims] = useState<{ width: number; height: number }>({ width: 700, height: 600 });
   const [brushPointerPos, setBrushPointerPos] = useState<{ x: number; y: number } | null>(null);
+
+  const hasSelection = Boolean(selectedObject || (selectionBounds && selectionBounds.width > 0));
 
   useEffect(() => {
     if (!containerRef.current) return;
@@ -383,6 +391,37 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
         >
           <ZoomIn className="w-4 h-4" />
         </button>
+
+        {/* Reset View / Recenter on Artwork (Eye - Same as double middle-click) */}
+        {onRecenterView && (
+          <button
+            type="button"
+            onClick={onRecenterView}
+            className="p-1.5 rounded-xl text-slate-600 hover:text-indigo-600 hover:bg-indigo-50 transition-colors cursor-pointer"
+            title="Reset View / Recenter on Artwork (Same as double middle-click)"
+          >
+            <Eye className="w-4 h-4" />
+          </button>
+        )}
+
+        <div className="h-4 w-px bg-slate-200 mx-0.5" />
+
+        {/* Delete Selection (Bin - enabled whenever a selection exists) */}
+        {onDeleteSelected && (
+          <button
+            type="button"
+            onClick={onDeleteSelected}
+            disabled={!hasSelection}
+            className={`p-1.5 rounded-xl transition-colors ${
+              hasSelection
+                ? 'text-rose-600 hover:bg-rose-50 hover:text-rose-700 cursor-pointer'
+                : 'text-slate-300 opacity-40 cursor-not-allowed'
+            }`}
+            title={hasSelection ? 'Delete selected elements (Delete / Backspace)' : 'Delete (No selection active)'}
+          >
+            <Trash2 className="w-4 h-4" />
+          </button>
+        )}
       </div>
 
       {/* Empty State Overlay */}
@@ -439,6 +478,7 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
               rasterUrl={compareData?.rasterUrl || null}
               svgString={compareData?.svgString || null}
               matBackground={matBackground}
+              onChangeMatBackground={onChangeMatBackground}
               onSwitchToRaster={onSwitchToRaster}
               onSwitchToVector={onSwitchToVector}
               onTriggerVectorize={onTriggerVectorize}

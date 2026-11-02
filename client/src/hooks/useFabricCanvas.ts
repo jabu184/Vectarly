@@ -45,8 +45,10 @@ import {
 import {
   strokeToMultiPolygon,
   applyStrokeToLayerGeometry,
+  createCirclePolygon,
   type Point2D
 } from '../services/brushEngine';
+import { normalizeHexColor, areColorsMatching } from '../services/colorUtils';
 import { smoothSvgPathString } from '../services/outlineSmoothing';
 
 export type CanvasMode = 'raster' | 'vector' | 'compare';
@@ -305,9 +307,11 @@ function extractSubpathsFromCommands(commands: any[]): ExtractedSubpath[] {
  */
 function createAbsoluteWorldPath(svgD: string, options: any = {}): Path {
   const p = new Path(svgD.trim(), {
+    stroke: null,
     strokeWidth: 0,
     fillRule: 'evenodd',
     perPixelTargetFind: true,
+    objectCaching: false,
     ...options,
     originX: 'center',
     originY: 'center'
@@ -340,6 +344,8 @@ export function useFabricCanvas() {
     rasterUrl: null,
     svgString: null
   });
+  const [isFlattening, setIsFlattening] = useState<boolean>(false);
+  const [activeFlattenMode, setActiveFlattenMode] = useState<FlattenMode>('knockout');
 
   // Undo / Redo Stacks
   const undoStackRef = useRef<HistorySnapshot[]>([]);
@@ -435,8 +441,9 @@ export function useFabricCanvas() {
   const brushPreviewObjRef = useRef<FabricObject | null>(null);
   const brushTargetPolyRef = useRef<any>([]);
   const brushTargetObjsRef = useRef<FabricObject[]>([]);
-  const brushOtherLayersRef = useRef<Map<string, { objs: FabricObject[]; poly: any }>>(new Map());
+  const brushOtherLayersRef = useRef<Map<string, { objs: FabricObject[]; poly: any; zIndex: number }>>(new Map());
   const brushActiveTargetColorRef = useRef<string>('#000000');
+  const brushTargetZIndexRef = useRef<number>(0);
 
   // Right-Mouse Brush Size Quick Resizing
   const [isResizingBrush, setIsResizingBrush] = useState<boolean>(false);
@@ -947,21 +954,12 @@ export function useFabricCanvas() {
         effectiveTarget = activeObj;
       }
 
-      if (effectiveTarget && effectiveTarget !== cropOverlayObjRef.current) {
-        setContextMenuState({
-          isOpen: true,
-          x: e.clientX,
-          y: e.clientY,
-          targetObject: effectiveTarget
-        });
-      } else {
-        setContextMenuState({
-          isOpen: false,
-          x: 0,
-          y: 0,
-          targetObject: null
-        });
-      }
+      setContextMenuState({
+        isOpen: true,
+        x: e.clientX,
+        y: e.clientY,
+        targetObject: effectiveTarget && effectiveTarget !== cropOverlayObjRef.current ? effectiveTarget : null
+      });
     });
 
     canvas.on('mouse:wheel', (opt) => {
@@ -1062,14 +1060,126 @@ export function useFabricCanvas() {
     const wrapperEl = (canvas as any).wrapperEl;
     const containerEl = containerRef.current;
 
+    const handleContainerContextMenu = (e: MouseEvent) => {
+      if (brushModeRef.current !== 'none') return;
+      e.preventDefault();
+      setContextMenuState({
+        isOpen: true,
+        x: e.clientX,
+        y: e.clientY,
+        targetObject: canvas.getActiveObject() || null
+      });
+    };
+
     const handleUpperDblClick = (e: MouseEvent) => {
       handleCanvasDblClick({ e });
+    };
+
+    // Multi-touch Pinch-to-Zoom & Pan Tracking for Touch / Hands-free Devices
+    let isTouchPinching = false;
+    let initialTouchDist = 0;
+    let initialTouchZoom = 1;
+    let lastTouchMidpoint = { x: 0, y: 0 };
+    let isTouchPanning = false;
+
+    const handleCanvasTouchStart = (e: TouchEvent) => {
+      if (e.touches.length === 2) {
+        e.preventDefault();
+        isTouchPinching = true;
+        isTouchPanning = true;
+
+        const t1 = e.touches[0];
+        const t2 = e.touches[1];
+        const dist = Math.hypot(t2.clientX - t1.clientX, t2.clientY - t1.clientY);
+        initialTouchDist = dist > 0 ? dist : 1;
+        initialTouchZoom = canvas.getZoom();
+
+        const midX = (t1.clientX + t2.clientX) / 2;
+        const midY = (t1.clientY + t2.clientY) / 2;
+        lastTouchMidpoint = { x: midX, y: midY };
+
+        canvas.selection = false;
+        canvas.discardActiveObject();
+        canvas.requestRenderAll();
+      } else if (e.touches.length === 1) {
+        const t = e.touches[0];
+        lastTouchMidpoint = { x: t.clientX, y: t.clientY };
+
+        // If brush mode is active, let brush engine handle drawing
+        if (brushModeRef.current !== 'none') return;
+
+        // Check if user touched an object or empty canvas / mat
+        const target = canvas.findTarget(e);
+        if (!target || target === canvas.backgroundImage || (target as any).name === 'mat-background') {
+          isTouchPanning = true;
+          canvas.selection = false;
+        }
+      }
+    };
+
+    const handleCanvasTouchMove = (e: TouchEvent) => {
+      if (e.touches.length === 2 && isTouchPinching) {
+        e.preventDefault();
+        const t1 = e.touches[0];
+        const t2 = e.touches[1];
+        const currentDist = Math.hypot(t2.clientX - t1.clientX, t2.clientY - t1.clientY);
+        const midX = (t1.clientX + t2.clientX) / 2;
+        const midY = (t1.clientY + t2.clientY) / 2;
+
+        // 1. Pan delta
+        const dx = midX - lastTouchMidpoint.x;
+        const dy = midY - lastTouchMidpoint.y;
+        lastTouchMidpoint = { x: midX, y: midY };
+        canvas.relativePan(new Point(dx, dy));
+
+        // 2. Pinch zoom around midpoint
+        if (initialTouchDist > 0) {
+          const scale = currentDist / initialTouchDist;
+          let newZoom = initialTouchZoom * scale;
+          if (newZoom > 5) newZoom = 5;
+          if (newZoom < 0.2) newZoom = 0.2;
+
+          const rect = upperEl.getBoundingClientRect();
+          const focalPoint = new Point(midX - rect.left, midY - rect.top);
+          canvas.zoomToPoint(focalPoint, newZoom);
+          setZoomLevel(Math.round(newZoom * 100) / 100);
+        }
+
+        canvas.requestRenderAll();
+        updateViewportTransformRef.current();
+      } else if (e.touches.length === 1 && isTouchPanning) {
+        e.preventDefault();
+        const t = e.touches[0];
+        const dx = t.clientX - lastTouchMidpoint.x;
+        const dy = t.clientY - lastTouchMidpoint.y;
+        lastTouchMidpoint = { x: t.clientX, y: t.clientY };
+        canvas.relativePan(new Point(dx, dy));
+        canvas.requestRenderAll();
+        updateViewportTransformRef.current();
+      }
+    };
+
+    const handleCanvasTouchEnd = (e: TouchEvent) => {
+      if (e.touches.length < 2) {
+        isTouchPinching = false;
+        initialTouchDist = 0;
+      }
+      if (e.touches.length === 0) {
+        isTouchPanning = false;
+        canvas.selection = brushModeRef.current === 'none';
+        canvas.calcOffset();
+        updateViewportTransformRef.current();
+      }
     };
 
     if (upperEl) {
       upperEl.addEventListener('mousedown', handleMiddleMouseDown);
       upperEl.addEventListener('auxclick', handleAuxClick);
       upperEl.addEventListener('dblclick', handleUpperDblClick);
+      upperEl.addEventListener('touchstart', handleCanvasTouchStart, { passive: false });
+      upperEl.addEventListener('touchmove', handleCanvasTouchMove, { passive: false });
+      upperEl.addEventListener('touchend', handleCanvasTouchEnd);
+      upperEl.addEventListener('touchcancel', handleCanvasTouchEnd);
     }
     if (wrapperEl && wrapperEl !== upperEl) {
       wrapperEl.addEventListener('mousedown', handleMiddleMouseDown);
@@ -1078,6 +1188,7 @@ export function useFabricCanvas() {
     if (containerEl) {
       containerEl.addEventListener('mousedown', handleMiddleMouseDown);
       containerEl.addEventListener('auxclick', handleAuxClick);
+      containerEl.addEventListener('contextmenu', handleContainerContextMenu);
     }
 
     window.addEventListener('mousemove', handleWindowMouseMove, { passive: false });
@@ -1089,10 +1200,19 @@ export function useFabricCanvas() {
         upperEl.removeEventListener('mousedown', handleMiddleMouseDown);
         upperEl.removeEventListener('auxclick', handleAuxClick);
         upperEl.removeEventListener('dblclick', handleUpperDblClick);
+        upperEl.removeEventListener('touchstart', handleCanvasTouchStart);
+        upperEl.removeEventListener('touchmove', handleCanvasTouchMove);
+        upperEl.removeEventListener('touchend', handleCanvasTouchEnd);
+        upperEl.removeEventListener('touchcancel', handleCanvasTouchEnd);
       }
       if (wrapperEl && wrapperEl !== upperEl) {
         wrapperEl.removeEventListener('mousedown', handleMiddleMouseDown);
         wrapperEl.removeEventListener('auxclick', handleAuxClick);
+      }
+      if (containerEl) {
+        containerEl.removeEventListener('mousedown', handleMiddleMouseDown);
+        containerEl.removeEventListener('auxclick', handleAuxClick);
+        containerEl.removeEventListener('contextmenu', handleContainerContextMenu);
       }
       if (containerEl) {
         containerEl.removeEventListener('mousedown', handleMiddleMouseDown);
@@ -1246,6 +1366,11 @@ export function useFabricCanvas() {
   }, [isLineArt, lineArtPenWidth, lineArtColorMode, vinylSettings]);
 
   const getRasterDataUrl = useCallback((): string => {
+    // If the original uncropped raster data URL is preserved, return it directly for 100% loss-free vectorization
+    if (originalRasterRef.current && originalRasterRef.current.startsWith('data:image/') && activeCropType === 'none') {
+      return originalRasterRef.current;
+    }
+
     const canvas = fabricCanvasRef.current;
     if (!canvas) return '';
 
@@ -1278,7 +1403,7 @@ export function useFabricCanvas() {
       canvas.renderAll();
     }
     return dataUrl;
-  }, []);
+  }, [activeCropType]);
 
   /**
    * Capture a snapshot for the history stack (JSON serialization preserves exact positions with zero drift)
@@ -1610,27 +1735,57 @@ export function useFabricCanvas() {
           selectable: true,
           hasControls: true,
           hoverCursor: 'pointer',
-          perPixelTargetFind: true
+          perPixelTargetFind: true,
+          objectCaching: false
         });
         canvas.add(obj);
       });
 
-      const svgWidth = maxX - minX || 500;
-      const svgHeight = maxY - minY || 500;
+      // Parse exact SVG viewBox or dimensions to align perfectly 1:1 with raster source
+      let svgViewBox = { x: 0, y: 0, width: 0, height: 0 };
+      try {
+        const parser = new DOMParser();
+        const doc = parser.parseFromString(svgString, 'image/svg+xml');
+        const svgEl = doc.querySelector('svg');
+        if (svgEl) {
+          const vb = svgEl.getAttribute('viewBox');
+          if (vb) {
+            const parts = vb.trim().split(/[\s,]+/).map(Number);
+            if (parts.length === 4 && parts[2] > 0 && parts[3] > 0) {
+              svgViewBox = { x: parts[0], y: parts[1], width: parts[2], height: parts[3] };
+            }
+          }
+          if (svgViewBox.width === 0) {
+            const w = parseFloat(svgEl.getAttribute('width') || '0');
+            const h = parseFloat(svgEl.getAttribute('height') || '0');
+            if (w > 0 && h > 0) {
+              svgViewBox = { x: 0, y: 0, width: w, height: h };
+            }
+          }
+        }
+      } catch (e) {
+        console.warn('Could not parse SVG dimensions:', e);
+      }
+
+      const svgWidth = svgViewBox.width > 0 ? svgViewBox.width : (maxX - minX || 500);
+      const svgHeight = svgViewBox.height > 0 ? svgViewBox.height : (maxY - minY || 500);
+      const origMinX = svgViewBox.width > 0 ? svgViewBox.x : minX;
+      const origMinY = svgViewBox.height > 0 ? svgViewBox.y : minY;
+
       const maxDim = Math.min(canvas.width * 0.8, canvas.height * 0.8);
       const scale = Math.min(maxDim / svgWidth, maxDim / svgHeight, 1);
+      const left = (canvas.width - svgWidth * scale) / 2;
+      const top = (canvas.height - svgHeight * scale) / 2;
 
-      const offsetX = (canvas.width - svgWidth * scale) / 2 - minX * scale;
-      const offsetY = (canvas.height - svgHeight * scale) / 2 - minY * scale;
+      masterArtworkFrameRef.current = {
+        left,
+        top,
+        width: svgWidth * scale,
+        height: svgHeight * scale
+      };
 
-      if (!masterArtworkFrameRef.current) {
-        masterArtworkFrameRef.current = {
-          left: (canvas.width - svgWidth * scale) / 2,
-          top: (canvas.height - svgHeight * scale) / 2,
-          width: svgWidth * scale,
-          height: svgHeight * scale
-        };
-      }
+      const offsetX = left - origMinX * scale;
+      const offsetY = top - origMinY * scale;
 
       const masterList: MasterVectorPath[] = [];
       const colorSet = new Set<string>();
@@ -1651,7 +1806,7 @@ export function useFabricCanvas() {
         const bounds = obj.getBoundingRect();
         masterList.push({
           obj,
-          originalFill: fillStr,
+          originalFill: (obj as any)._originalFill || fillStr,
           originalStroke: typeof obj.stroke === 'string' ? obj.stroke : null,
           originalStrokeWidth: obj.strokeWidth || 0,
           area: bounds.width * bounds.height
@@ -1877,7 +2032,8 @@ export function useFabricCanvas() {
           selectable: true,
           hasControls: true,
           hoverCursor: 'pointer',
-          perPixelTargetFind: true
+          perPixelTargetFind: true,
+          objectCaching: false
         });
         const fillStr = (typeof obj.fill === 'string' && obj.fill !== 'none' ? obj.fill : '#000000').trim().toUpperCase();
         if (fillStr.startsWith('#') || fillStr.startsWith('RGB')) {
@@ -1915,16 +2071,32 @@ export function useFabricCanvas() {
    */
   const loadRasterImage = useCallback(async (dataUrl: string, isSource = false) => {
     pushUndoSnapshot();
+
+    let resolvedDataUrl = dataUrl;
+    if (dataUrl.startsWith('/') || dataUrl.startsWith('http')) {
+      try {
+        const resp = await fetch(dataUrl);
+        const blob = await resp.blob();
+        resolvedDataUrl = await new Promise<string>((resolve) => {
+          const reader = new FileReader();
+          reader.onloadend = () => resolve(reader.result as string);
+          reader.readAsDataURL(blob);
+        });
+      } catch (err) {
+        console.warn('[RasterLoad] Failed to convert path to dataUrl:', err);
+      }
+    }
+
     if (isSource || !originalRasterRef.current) {
-      originalRasterRef.current = dataUrl;
-      initialArtworkRef.current = { mode: 'raster', data: dataUrl };
+      originalRasterRef.current = resolvedDataUrl;
+      initialArtworkRef.current = { mode: 'raster', data: resolvedDataUrl };
       if (isSource) {
         // A new source import invalidates any previous vector conversion and resets anchor frame
         originalVectorRef.current = null;
         masterArtworkFrameRef.current = null;
       }
     }
-    await renderRasterInternal(dataUrl);
+    await renderRasterInternal(resolvedDataUrl);
   }, [pushUndoSnapshot, renderRasterInternal]);
 
   /**
@@ -2241,10 +2413,10 @@ export function useFabricCanvas() {
 
     pushUndoSnapshot();
 
-    const normColor = color.trim().toUpperCase();
+    const normColor = normalizeHexColor(color);
     canvas.getObjects().forEach((obj) => {
-      const currentFill = (obj.fill as string || '').trim().toUpperCase();
-      if (currentFill === normColor) {
+      const f = (obj.fill as string) || (obj as any)._originalFill;
+      if (areColorsMatching(f, normColor)) {
         const nextVis = visible !== undefined ? visible : !obj.visible;
         obj.set('visible', nextVis);
       }
@@ -2255,15 +2427,113 @@ export function useFabricCanvas() {
     refreshColorLayers();
   }, [pushUndoSnapshot, refreshColorLayers]);
 
+  /**
+   * Unhides all vector objects on canvas.
+   */
+  const showAllVectors = useCallback(() => {
+    const canvas = fabricCanvasRef.current;
+    if (!canvas) return;
+
+    pushUndoSnapshot();
+
+    const vectorObjs = canvas.getObjects().filter(
+      (o) => (o as any).name !== 'crop-overlay' && (o as any).name !== 'lasso-preview' && (o as any).name !== 'raster-target'
+    );
+    vectorObjs.forEach((o) => o.set('visible', true));
+
+    canvas.renderAll();
+    refreshColorLayers();
+  }, [pushUndoSnapshot, refreshColorLayers]);
+
+  /**
+   * Hides all vector objects on canvas.
+   */
+  const hideAllVectors = useCallback(() => {
+    const canvas = fabricCanvasRef.current;
+    if (!canvas) return;
+
+    pushUndoSnapshot();
+
+    const vectorObjs = canvas.getObjects().filter(
+      (o) => (o as any).name !== 'crop-overlay' && (o as any).name !== 'lasso-preview' && (o as any).name !== 'raster-target'
+    );
+    vectorObjs.forEach((o) => o.set('visible', false));
+
+    canvas.discardActiveObject();
+    setSelectedObject(null);
+
+    canvas.renderAll();
+    refreshColorLayers();
+  }, [pushUndoSnapshot, refreshColorLayers]);
+
+  /**
+   * Togglable Hide/Show All:
+   * If all vector objects on canvas are visible, hides all of them.
+   * If any vector object is hidden, unhides all of them.
+   */
+  const toggleHideShowAll = useCallback(() => {
+    const canvas = fabricCanvasRef.current;
+    if (!canvas) return;
+
+    pushUndoSnapshot();
+
+    const vectorObjs = canvas.getObjects().filter(
+      (o) => (o as any).name !== 'crop-overlay' && (o as any).name !== 'lasso-preview' && (o as any).name !== 'raster-target'
+    );
+    if (vectorObjs.length === 0) return;
+
+    const areAllVisible = vectorObjs.every((o) => o.visible !== false);
+    const nextVis = !areAllVisible;
+
+    vectorObjs.forEach((o) => o.set('visible', nextVis));
+
+    if (!nextVis) {
+      canvas.discardActiveObject();
+      setSelectedObject(null);
+    }
+
+    canvas.renderAll();
+    refreshColorLayers();
+  }, [pushUndoSnapshot, refreshColorLayers]);
+
+  /**
+   * Togglable Hide/Show Selection:
+   * Toggles visibility of the currently selected element or active selection.
+   */
+  const toggleHideShowSelection = useCallback((target?: FabricObject) => {
+    const canvas = fabricCanvasRef.current;
+    const active = target || canvas?.getActiveObject() || selectedObject;
+    if (!canvas || !active) return;
+
+    pushUndoSnapshot();
+
+    const objs = (active instanceof ActiveSelection || typeof (active as any).getObjects === 'function')
+      ? (active as any).getObjects()
+      : [active];
+
+    const anyVisible = objs.some((o: FabricObject) => o.visible !== false);
+    const nextVis = !anyVisible;
+
+    objs.forEach((o: FabricObject) => o.set('visible', nextVis));
+
+    if (!nextVis) {
+      canvas.discardActiveObject();
+      setSelectedObject(null);
+    }
+
+    canvas.renderAll();
+    refreshColorLayers();
+  }, [selectedObject, pushUndoSnapshot, refreshColorLayers]);
+
   const selectObjectsByColor = useCallback((color: string) => {
     const canvas = fabricCanvasRef.current;
     if (!canvas) return;
 
-    const normColor = color.trim().toUpperCase();
+    const normColor = normalizeHexColor(color);
     const matching = canvas.getObjects().filter((obj) => {
       if ((obj as any).name === 'crop-overlay' || (obj as any).name === 'lasso-preview') return false;
-      const f = ((obj.fill as string) || '').trim().toUpperCase();
-      return f === normColor;
+      const f = (obj.fill as string) || (obj as any)._originalFill;
+      return areColorsMatching(f, normColor);
     });
 
     if (matching.length === 0) return;
@@ -2780,7 +3050,7 @@ export function useFabricCanvas() {
    * 4. Updates canvas in place with the resulting paths.
    */
   const flattenArtwork = useCallback(
-    (mode: FlattenMode = 'knockout', orderedColors?: string[]) => {
+    async (mode: FlattenMode = 'knockout', orderedColors?: string[]) => {
       const canvas = fabricCanvasRef.current;
       if (!canvas) return;
 
@@ -2790,147 +3060,165 @@ export function useFabricCanvas() {
 
       if (objects.length === 0) return;
 
-      pushUndoSnapshot();
+      setIsFlattening(true);
+      setActiveFlattenMode(mode);
 
-      // Determine active mat order: index 0 is Top / Foreground, last index is Base / Background
-      const explicitOrder = (
-        orderedColors && orderedColors.length > 0
-          ? orderedColors
-          : colorLayersRef.current.map((l) => l.color)
-      ).map((c) => c.trim().toUpperCase());
+      // Yield execution so the progress popup prompt renders on screen immediately
+      await new Promise((resolve) => setTimeout(resolve, 60));
 
-      // If any colors on canvas are missing from explicitOrder, derive their order from canvas z-order (top to bottom)
-      const canvasReverseColors: string[] = [];
-      for (let i = objects.length - 1; i >= 0; i--) {
-        const fill = ((objects[i].fill as string) || (objects[i] as any)._originalFill || '').trim().toUpperCase();
-        if (fill && fill !== 'NONE' && fill !== 'TRANSPARENT' && !canvasReverseColors.includes(fill)) {
-          canvasReverseColors.push(fill);
+      const startTime = Date.now();
+      try {
+        pushUndoSnapshot();
+
+        // Determine active mat order: index 0 is Top / Foreground, last index is Base / Background
+        const explicitOrder = (
+          orderedColors && orderedColors.length > 0
+            ? orderedColors
+            : colorLayersRef.current.map((l) => l.color)
+        ).map((c) => c.trim().toUpperCase());
+
+        // If any colors on canvas are missing from explicitOrder, derive their order from canvas z-order (top to bottom)
+        const canvasReverseColors: string[] = [];
+        for (let i = objects.length - 1; i >= 0; i--) {
+          const fill = ((objects[i].fill as string) || (objects[i] as any)._originalFill || '').trim().toUpperCase();
+          if (fill && fill !== 'NONE' && fill !== 'TRANSPARENT' && !canvasReverseColors.includes(fill)) {
+            canvasReverseColors.push(fill);
+          }
         }
-      }
 
-      const effectiveOrder: string[] = [...explicitOrder];
-      for (const col of canvasReverseColors) {
-        if (!effectiveOrder.includes(col)) {
-          effectiveOrder.push(col);
+        const effectiveOrder: string[] = [...explicitOrder];
+        for (const col of canvasReverseColors) {
+          if (!effectiveOrder.includes(col)) {
+            effectiveOrder.push(col);
+          }
         }
-      }
 
-      // Map objects by normalized color
-      const colorGroupsMap = new Map<
-        string,
-        {
-          objects: FabricObject[];
-          pathStrings: string[];
-          contoursList: { x: number; y: number }[][][];
-          maxZ: number;
-          totalArea: number;
-        }
-      >();
+        // Map objects by normalized color
+        const colorGroupsMap = new Map<
+          string,
+          {
+            objects: FabricObject[];
+            pathStrings: string[];
+            contoursList: { x: number; y: number }[][][];
+            maxZ: number;
+            totalArea: number;
+          }
+        >();
 
-      objects.forEach((obj, idx) => {
-        const fill = ((obj.fill as string) || '').trim();
-        const color = fill && fill !== 'none' && fill !== 'transparent' ? fill.toUpperCase() : '#000000';
+        objects.forEach((obj, idx) => {
+          const fill = ((obj.fill as string) || '').trim();
+          const color = fill && fill !== 'none' && fill !== 'transparent' ? fill.toUpperCase() : '#000000';
 
-        const cmds = extractCommandsFromObject(obj);
-        if (cmds.length === 0) return;
-        const d = commandsToD(cmds);
-        if (!d || !d.trim()) return;
-        const contours = commandsToContours(cmds);
+          const cmds = extractCommandsFromObject(obj);
+          if (cmds.length === 0) return;
+          const d = commandsToD(cmds);
+          if (!d || !d.trim()) return;
+          const contours = commandsToContours(cmds);
 
-        const b = obj.getBoundingRect();
-        const area = (b.width || 0) * (b.height || 0);
+          const b = obj.getBoundingRect();
+          const area = (b.width || 0) * (b.height || 0);
 
-        if (!colorGroupsMap.has(color)) {
-          colorGroupsMap.set(color, {
-            objects: [],
-            pathStrings: [],
-            contoursList: [],
-            maxZ: idx,
-            totalArea: 0
+          if (!colorGroupsMap.has(color)) {
+            colorGroupsMap.set(color, {
+              objects: [],
+              pathStrings: [],
+              contoursList: [],
+              maxZ: idx,
+              totalArea: 0
+            });
+          }
+          const entry = colorGroupsMap.get(color)!;
+          entry.objects.push(obj);
+          entry.pathStrings.push(d.trim());
+          if (contours.length > 0) {
+            entry.contoursList.push(contours);
+          }
+          entry.maxZ = Math.max(entry.maxZ, idx);
+          entry.totalArea += area;
+        });
+
+        if (colorGroupsMap.size === 0) return;
+
+        // Order color groups strictly according to Active Mats list order (top-to-bottom: foreground to background)
+        const sortedGroups = Array.from(colorGroupsMap.entries())
+          .sort((a, b) => {
+            const idxA = effectiveOrder.indexOf(a[0]);
+            const idxB = effectiveOrder.indexOf(b[0]);
+            if (idxA !== -1 && idxB !== -1) {
+              return idxA - idxB;
+            }
+            if (idxA !== -1) return -1;
+            if (idxB !== -1) return 1;
+            return 0;
+          })
+          .map(([color, data]) => ({
+            color,
+            pathStrings: data.pathStrings,
+            contoursList: data.contoursList
+          }));
+
+        // Compute geometry based on selected mode
+        const flattenedLayers = flattenColorLayers(sortedGroups, mode);
+        if (flattenedLayers.length === 0) return;
+
+        // Remove existing vector objects
+        objects.forEach((obj) => canvas.remove(obj));
+
+        // Add flattened paths in back-to-front order (reverse of front-to-back)
+        const newMasterPaths: MasterVectorPath[] = [];
+        const newColors: string[] = [];
+
+        const layersToAdd = [...flattenedLayers].reverse();
+
+        for (const layer of layersToAdd) {
+          const pathObj = createAbsoluteWorldPath(layer.d, {
+            fill: layer.color,
+            stroke: null,
+            strokeWidth: 0,
+            objectCaching: false,
+            selectable: true,
+            hasControls: true,
+            hoverCursor: 'pointer'
+          });
+
+          (pathObj as any)._originalFill = layer.color;
+          (pathObj as any)._originalStroke = null;
+          (pathObj as any)._originalStrokeWidth = 0;
+
+          canvas.add(pathObj);
+          applyDashedBoundingStyles(pathObj);
+
+          const b = pathObj.getBoundingRect();
+          newMasterPaths.push({
+            obj: pathObj,
+            originalFill: layer.color,
+            originalStroke: null,
+            originalStrokeWidth: 0,
+            area: b.width * b.height
           });
         }
-        const entry = colorGroupsMap.get(color)!;
-        entry.objects.push(obj);
-        entry.pathStrings.push(d.trim());
-        if (contours.length > 0) {
-          entry.contoursList.push(contours);
+
+        // Maintain exact top-to-bottom order for uniqueColors
+        newColors.push(...flattenedLayers.map((l) => l.color));
+
+        masterPathsRef.current = newMasterPaths;
+        uniqueColorsRef.current = newColors;
+        setMaxColorCount(Math.max(newColors.length, 2));
+        setActiveColorCount(newColors.length);
+
+        canvas.discardActiveObject();
+        canvas.renderAll();
+        refreshColorLayers();
+        runWeedCheck();
+      } catch (err) {
+        console.error('[FlattenArtwork] Error during flattening:', err);
+      } finally {
+        const elapsed = Date.now() - startTime;
+        if (elapsed < 500) {
+          await new Promise((resolve) => setTimeout(resolve, 500 - elapsed));
         }
-        entry.maxZ = Math.max(entry.maxZ, idx);
-        entry.totalArea += area;
-      });
-
-      if (colorGroupsMap.size === 0) return;
-
-      // Order color groups strictly according to Active Mats list order (top-to-bottom: foreground to background)
-      const sortedGroups = Array.from(colorGroupsMap.entries())
-        .sort((a, b) => {
-          const idxA = effectiveOrder.indexOf(a[0]);
-          const idxB = effectiveOrder.indexOf(b[0]);
-          if (idxA !== -1 && idxB !== -1) {
-            return idxA - idxB;
-          }
-          if (idxA !== -1) return -1;
-          if (idxB !== -1) return 1;
-          return 0;
-        })
-        .map(([color, data]) => ({
-          color,
-          pathStrings: data.pathStrings,
-          contoursList: data.contoursList
-        }));
-
-      // Compute geometry based on selected mode
-      const flattenedLayers = flattenColorLayers(sortedGroups, mode);
-      if (flattenedLayers.length === 0) return;
-
-      // Remove existing vector objects
-      objects.forEach((obj) => canvas.remove(obj));
-
-      // Add flattened paths in back-to-front order (reverse of front-to-back)
-      const newMasterPaths: MasterVectorPath[] = [];
-      const newColors: string[] = [];
-
-      const layersToAdd = [...flattenedLayers].reverse();
-
-      for (const layer of layersToAdd) {
-        const pathObj = createAbsoluteWorldPath(layer.d, {
-          fill: layer.color,
-          stroke: undefined,
-          strokeWidth: 0,
-          selectable: true,
-          hasControls: true,
-          hoverCursor: 'pointer'
-        });
-
-        (pathObj as any)._originalFill = layer.color;
-        (pathObj as any)._originalStroke = null;
-        (pathObj as any)._originalStrokeWidth = 0;
-
-        canvas.add(pathObj);
-        applyDashedBoundingStyles(pathObj);
-
-        const b = pathObj.getBoundingRect();
-        newMasterPaths.push({
-          obj: pathObj,
-          originalFill: layer.color,
-          originalStroke: null,
-          originalStrokeWidth: 0,
-          area: b.width * b.height
-        });
+        setIsFlattening(false);
       }
-
-      // Maintain exact top-to-bottom order for uniqueColors
-      newColors.push(...flattenedLayers.map((l) => l.color));
-
-      masterPathsRef.current = newMasterPaths;
-      uniqueColorsRef.current = newColors;
-      setMaxColorCount(Math.max(newColors.length, 2));
-      setActiveColorCount(newColors.length);
-
-      canvas.discardActiveObject();
-      canvas.renderAll();
-      refreshColorLayers();
-      runWeedCheck();
     },
     [pushUndoSnapshot, applyDashedBoundingStyles, refreshColorLayers, runWeedCheck]
   );
@@ -3840,39 +4128,15 @@ export function useFabricCanvas() {
         );
         brushTargetPolyRef.current = res.updatedMultiPoly;
 
-        // If in paint mode: ensure non-overlapping vinyl mats by subtracting stroke from other layers
-        if (brushMode === 'paint') {
-          for (const [otherCol, otherData] of brushOtherLayersRef.current.entries()) {
-            if (otherData.poly && otherData.poly.length > 0) {
-              try {
-                const diff = (polygonClipping as any).difference(otherData.poly, segPoly);
-                otherData.poly = diff;
-                otherData.objs.forEach((o) => canvas.remove(o));
-                const diffD = multiPolygonToSvgD(diff);
-                if (diffD && diffD.trim().length > 0) {
-                  const p = createAbsoluteWorldPath(diffD, {
-                    fill: otherCol,
-                    selectable: false,
-                    evented: false,
-                    hoverCursor: 'crosshair'
-                  });
-                  (p as any)._originalFill = otherCol;
-                  (p as any)._originalStroke = null;
-                  (p as any)._originalStrokeWidth = 0;
-                  canvas.add(p);
-                  otherData.objs = [p];
-                } else {
-                  otherData.objs = [];
-                }
-              } catch (err) {
-                console.warn('[BrushLive] Non-overlapping subtraction failed for layer:', otherCol, err);
-              }
-            }
-          }
-        }
+        // Paint effect applies strictly to the layer being edited; all elements on layers above remain above and untouched
+        let targetZ = brushTargetZIndexRef.current;
+        brushTargetObjsRef.current.forEach((o) => {
+          const idx = canvas.getObjects().indexOf(o);
+          if (idx !== -1 && idx < targetZ) targetZ = idx;
+          canvas.remove(o);
+        });
+        brushTargetZIndexRef.current = targetZ;
 
-        // Update target layer on canvas
-        brushTargetObjsRef.current.forEach((o) => canvas.remove(o));
         if (res.svgD && res.svgD.trim().length > 0) {
           const newPath = createAbsoluteWorldPath(res.svgD, {
             fill: targetColor,
@@ -3883,7 +4147,8 @@ export function useFabricCanvas() {
           (newPath as any)._originalFill = targetColor;
           (newPath as any)._originalStroke = null;
           (newPath as any)._originalStrokeWidth = 0;
-          canvas.add(newPath);
+          const insertAt = Math.max(0, Math.min(canvas.getObjects().length, targetZ));
+          canvas.insertAt(insertAt, newPath);
           brushTargetObjsRef.current = [newPath];
         } else {
           brushTargetObjsRef.current = [];
@@ -3919,7 +4184,7 @@ export function useFabricCanvas() {
       // If the clicked loop is open / non-closed, it strictly does nothing!
       // =========================================================================
       if (brushMode === 'fill') {
-        const allObjects = canvas.getObjects().filter((o) => (o as any).name !== 'crop-overlay' && (o as any).name !== 'brush-preview');
+        const allObjects = canvas.getObjects().filter((o) => (o as any).name !== 'crop-overlay' && (o as any).name !== 'brush-preview' && o.visible !== false);
         if (allObjects.length === 0) return;
 
         // 1. Identify the target vector:
@@ -3929,9 +4194,9 @@ export function useFabricCanvas() {
         // c) Vector object matching activeBrushColor / selectedColor whose subpaths enclose pointer
         const activeObj = canvas.getActiveObject() || selectedObject;
         const candidateActiveObjs: FabricObject[] = [];
-        if (activeObj) {
+        if (activeObj && activeObj.visible !== false) {
           if ((activeObj as any).type === 'activeSelection' && typeof (activeObj as any).getObjects === 'function') {
-            candidateActiveObjs.push(...(activeObj as any).getObjects());
+            candidateActiveObjs.push(...(activeObj as any).getObjects().filter((o: FabricObject) => o.visible !== false));
           } else {
             candidateActiveObjs.push(activeObj);
           }
@@ -3992,7 +4257,7 @@ export function useFabricCanvas() {
         }
 
         // Target color of the vector
-        const targetColor = ((targetVector.fill as string) || (targetVector as any)._originalFill || activeBrushColor || selectedColor || '#000000').trim().toUpperCase();
+        const targetColor = normalizeHexColor((targetVector.fill as string) || (targetVector as any)._originalFill || activeBrushColor || selectedColor || '#000000');
 
         // Closed loop confirmed: construct filled polygon geometry
         const loopRing: [number, number][] = innermost.points.map((pt) => [
@@ -4013,8 +4278,8 @@ export function useFabricCanvas() {
 
         // Get all objects belonging to this target layer
         const targetObjects = allObjects.filter((o) => {
-          const f = ((o.fill as string) || (o as any)._originalFill || '').trim().toUpperCase();
-          return f === targetColor;
+          const f = (o.fill as string) || (o as any)._originalFill;
+          return areColorsMatching(f, targetColor);
         });
         if (!targetObjects.includes(targetVector)) {
           targetObjects.push(targetVector);
@@ -4039,22 +4304,28 @@ export function useFabricCanvas() {
           filledPoly = [...targetPoly, ...loopMultiPoly];
         }
 
-        // Knockout: subtract the filled area from other vinyl layers so layers do not overlap
+        // Knockout: subtract the filled area from other vinyl layers so layers do not overlap (skip hidden layers)
         const otherObjects = allObjects.filter((o) => {
-          const f = ((o.fill as string) || (o as any)._originalFill || '').trim().toUpperCase();
-          return f && f !== targetColor && f !== 'NONE' && f !== 'TRANSPARENT';
+          if (o.visible === false) return false;
+          const f = (o.fill as string) || (o as any)._originalFill;
+          const norm = normalizeHexColor(f);
+          return norm !== 'transparent' && !areColorsMatching(norm, targetColor);
         });
 
         const otherByColor = new Map<string, FabricObject[]>();
         otherObjects.forEach((o) => {
-          const c = ((o.fill as string) || (o as any)._originalFill || '').trim().toUpperCase();
+          const c = normalizeHexColor((o.fill as string) || (o as any)._originalFill);
           if (!otherByColor.has(c)) otherByColor.set(c, []);
           otherByColor.get(c)!.push(o);
         });
 
+        const canvasObjs = canvas.getObjects();
         for (const [col, colObjs] of otherByColor.entries()) {
           const contours: { x: number; y: number }[][][] = [];
+          let colZ = canvasObjs.length;
           colObjs.forEach((o) => {
+            const idx = canvasObjs.indexOf(o);
+            if (idx !== -1 && idx < colZ) colZ = idx;
             const cmds = extractCommandsFromObject(o);
             if (cmds.length > 0) {
               const c = commandsToContours(cmds);
@@ -4075,7 +4346,8 @@ export function useFabricCanvas() {
                   hoverCursor: 'crosshair'
                 });
                 (diffPath as any)._originalFill = col;
-                canvas.add(diffPath);
+                const insertAt = Math.max(0, Math.min(canvas.getObjects().length, colZ));
+                canvas.insertAt(insertAt, diffPath);
               }
             } catch (err) {
               console.warn('[FillTool] Knockout subtraction error for color:', col, err);
@@ -4083,8 +4355,14 @@ export function useFabricCanvas() {
           }
         }
 
-        // Replace target layer objects on canvas with new united path
-        targetObjects.forEach((obj) => canvas.remove(obj));
+        // Replace target layer objects on canvas with new united path AT original z-index
+        const currentAll = canvas.getObjects();
+        let targetZ = currentAll.length;
+        targetObjects.forEach((obj) => {
+          const idx = currentAll.indexOf(obj);
+          if (idx !== -1 && idx < targetZ) targetZ = idx;
+          canvas.remove(obj);
+        });
         const newD = multiPolygonToSvgD(filledPoly);
         if (newD && newD.trim().length > 0) {
           const newPath = createAbsoluteWorldPath(newD, {
@@ -4094,7 +4372,8 @@ export function useFabricCanvas() {
             hoverCursor: 'crosshair'
           });
           (newPath as any)._originalFill = targetColor;
-          canvas.add(newPath);
+          const insertAt = Math.max(0, Math.min(canvas.getObjects().length, targetZ));
+          canvas.insertAt(insertAt, newPath);
           setSelectedObject(newPath);
         }
 
@@ -4123,16 +4402,28 @@ export function useFabricCanvas() {
       isBrushMouseDownRef.current = true;
       brushStrokePointsRef.current = [{ x: pointer.x, y: pointer.y }];
 
-      const targetColor = (activeBrushColor || selectedColor || colorLayers[0]?.color || '#000000').trim().toUpperCase();
+      const targetColor = normalizeHexColor(activeBrushColor || selectedColor || colorLayers[0]?.color || '#000000');
       brushActiveTargetColorRef.current = targetColor;
 
       pushUndoSnapshot();
 
       const allObjects = canvas.getObjects().filter((o) => (o as any).name !== 'crop-overlay' && (o as any).name !== 'brush-preview');
       const targetObjects = allObjects.filter((o) => {
-        const f = ((o.fill as string) || (o as any)._originalFill || '').trim().toUpperCase();
-        return f === targetColor;
+        if (o.visible === false) return false;
+        const f = (o.fill as string) || (o as any)._originalFill;
+        return areColorsMatching(f, targetColor);
       });
+
+      // Find lowest z-index among target objects so painted layer remains in its original stack position
+      const allCanvasObjs = canvas.getObjects();
+      let targetZ = allCanvasObjs.length;
+      targetObjects.forEach((o) => {
+        const idx = allCanvasObjs.indexOf(o);
+        if (idx !== -1 && idx < targetZ) {
+          targetZ = idx;
+        }
+      });
+      brushTargetZIndexRef.current = targetZ;
 
       const targetContours: { x: number; y: number }[][][] = [];
       targetObjects.forEach((obj) => {
@@ -4147,22 +4438,27 @@ export function useFabricCanvas() {
       brushTargetObjsRef.current = targetObjects;
 
       if (brushMode === 'paint') {
-        const otherMap = new Map<string, { objs: FabricObject[]; poly: any }>();
+        const otherMap = new Map<string, { objs: FabricObject[]; poly: any; zIndex: number }>();
         const otherObjects = allObjects.filter((o) => {
-          const f = ((o.fill as string) || (o as any)._originalFill || '').trim().toUpperCase();
-          return f && f !== targetColor && f !== 'NONE' && f !== 'TRANSPARENT';
+          if (o.visible === false) return false;
+          const f = (o.fill as string) || (o as any)._originalFill;
+          const norm = normalizeHexColor(f);
+          return norm !== 'transparent' && !areColorsMatching(norm, targetColor);
         });
 
         const otherByColor = new Map<string, FabricObject[]>();
         otherObjects.forEach((o) => {
-          const c = ((o.fill as string) || (o as any)._originalFill || '').trim().toUpperCase();
+          const c = normalizeHexColor((o.fill as string) || (o as any)._originalFill);
           if (!otherByColor.has(c)) otherByColor.set(c, []);
           otherByColor.get(c)!.push(o);
         });
 
         for (const [col, colObjs] of otherByColor.entries()) {
           const contours: { x: number; y: number }[][][] = [];
+          let colZ = allCanvasObjs.length;
           colObjs.forEach((o) => {
+            const idx = allCanvasObjs.indexOf(o);
+            if (idx !== -1 && idx < colZ) colZ = idx;
             const cmds = extractCommandsFromObject(o);
             if (cmds.length > 0) {
               const c = commandsToContours(cmds);
@@ -4170,7 +4466,7 @@ export function useFabricCanvas() {
             }
           });
           const poly = pathsToMultiPolygon([], contours);
-          otherMap.set(col, { objs: colObjs, poly });
+          otherMap.set(col, { objs: colObjs, poly, zIndex: colZ });
         }
         brushOtherLayersRef.current = otherMap;
       } else {
@@ -4301,8 +4597,48 @@ export function useFabricCanvas() {
     if (mode === 'vector') {
       pushUndoSnapshot();
 
-      const objects = canvas.getObjects().filter((o) => o !== cropObj && (o as any).name !== 'crop-overlay');
+      const objects = canvas.getObjects().filter((o) => o !== cropObj && (o as any).name !== 'crop-overlay' && (o as any).name !== 'lasso-preview' && o.visible !== false);
       const cropBounds = cropObj.getBoundingRect();
+
+      let cropRing: [number, number][] = [];
+      if (activeCropType === 'rect') {
+        cropRing = [
+          [cropBounds.left, cropBounds.top],
+          [cropBounds.left + cropBounds.width, cropBounds.top],
+          [cropBounds.left + cropBounds.width, cropBounds.top + cropBounds.height],
+          [cropBounds.left, cropBounds.top + cropBounds.height],
+          [cropBounds.left, cropBounds.top]
+        ];
+      } else if (activeCropType === 'circle') {
+        const circleObj = cropObj as Circle;
+        const radius = (circleObj.radius || 50) * (circleObj.scaleX || 1);
+        const cx = cropBounds.left + cropBounds.width / 2;
+        const cy = cropBounds.top + cropBounds.height / 2;
+        cropRing = createCirclePolygon({ x: cx, y: cy }, radius, 64);
+      } else if (activeCropType.startsWith('lasso')) {
+        const points = lassoPointsRef.current;
+        if (points && points.length >= 3) {
+          cropRing = points.map((p) => [Number(p.x.toFixed(2)), Number(p.y.toFixed(2))]);
+          if (
+            cropRing[0][0] !== cropRing[cropRing.length - 1][0] ||
+            cropRing[0][1] !== cropRing[cropRing.length - 1][1]
+          ) {
+            cropRing.push([cropRing[0][0], cropRing[0][1]]);
+          }
+        }
+      }
+
+      if (cropRing.length < 4) {
+        cropRing = [
+          [cropBounds.left, cropBounds.top],
+          [cropBounds.left + cropBounds.width, cropBounds.top],
+          [cropBounds.left + cropBounds.width, cropBounds.top + cropBounds.height],
+          [cropBounds.left, cropBounds.top + cropBounds.height],
+          [cropBounds.left, cropBounds.top]
+        ];
+      }
+
+      const cropMultiPoly: number[][][][] = [[[...cropRing]]];
 
       const isInside = (pt: { x: number; y: number }) => {
         if (activeCropType === 'rect') {
@@ -4327,26 +4663,68 @@ export function useFabricCanvas() {
         return true;
       };
 
-      if (action === 'erase') {
-        const toDelete = objects.filter((obj) => {
+      for (const obj of objects) {
+        const origFill = normalizeHexColor((obj as any)._originalFill || obj.fill);
+        const origStroke = (obj as any)._originalStroke !== undefined ? (obj as any)._originalStroke : obj.stroke;
+        const origStrokeWidth = (obj as any)._originalStrokeWidth !== undefined ? (obj as any)._originalStrokeWidth : obj.strokeWidth;
+
+        let processed = false;
+        try {
+          const cmds = extractCommandsFromObject(obj);
+          if (cmds.length > 0) {
+            const contours = commandsToContours(cmds);
+            if (contours.length > 0) {
+              const objPoly = pathsToMultiPolygon([], [contours]);
+              if (objPoly && objPoly.length > 0) {
+                let resMultiPoly: number[][][][];
+                if (action === 'erase') {
+                  resMultiPoly = (polygonClipping as any).difference(objPoly, cropMultiPoly);
+                } else {
+                  resMultiPoly = (polygonClipping as any).intersection(objPoly, cropMultiPoly);
+                }
+
+                canvas.remove(obj);
+                processed = true;
+
+                if (resMultiPoly && resMultiPoly.length > 0) {
+                  const newD = multiPolygonToSvgD(resMultiPoly);
+                  if (newD && newD.trim().length > 0) {
+                    const newPath = createAbsoluteWorldPath(newD, {
+                      fill: origFill,
+                      stroke: origStroke,
+                      strokeWidth: origStrokeWidth,
+                      selectable: true,
+                      hasControls: true,
+                      hoverCursor: 'pointer'
+                    });
+                    (newPath as any)._originalFill = origFill;
+                    (newPath as any)._originalStroke = origStroke;
+                    (newPath as any)._originalStrokeWidth = origStrokeWidth;
+                    canvas.add(newPath);
+                  }
+                }
+              }
+            }
+          }
+        } catch (clipErr) {
+          console.warn('[VectorCrop] Polygon clipping error, falling back:', clipErr);
+        }
+
+        if (!processed) {
           const center = obj.getCenterPoint();
-          return isInside(center) || obj.intersectsWithObject(cropObj);
-        });
-        toDelete.forEach((obj) => canvas.remove(obj));
-      } else {
-        // CROP: Keep only objects that fall inside the selection
-        const toKeep = objects.filter((obj) => {
-          const center = obj.getCenterPoint();
-          return isInside(center) || obj.intersectsWithObject(cropObj);
-        });
-        const toDelete = objects.filter((obj) => !toKeep.includes(obj));
-        toDelete.forEach((obj) => canvas.remove(obj));
+          const inside = isInside(center);
+          if (action === 'erase') {
+            if (inside) canvas.remove(obj);
+          } else {
+            if (!inside) canvas.remove(obj);
+          }
+        }
       }
 
       cancelCrop();
 
       // Re-center remaining vector objects if action === 'crop' and objects remain
-      const remaining = canvas.getObjects().filter((o) => o.visible && (o as any).name !== 'crop-overlay');
+      const remaining = canvas.getObjects().filter((o) => o.visible && (o as any).name !== 'crop-overlay' && (o as any).name !== 'lasso-preview');
       if (action === 'crop' && remaining.length > 0) {
         let rMinX = Infinity, rMinY = Infinity, rMaxX = -Infinity, rMaxY = -Infinity;
         remaining.forEach((o) => {
@@ -4374,15 +4752,21 @@ export function useFabricCanvas() {
       // Rebuild masterPathsRef
       masterPathsRef.current = remaining.map((obj) => {
         const b = obj.getBoundingRect();
-        const fillStr = (typeof obj.fill === 'string' && obj.fill !== 'none' ? obj.fill : '#000000').trim().toUpperCase();
+        const fillStr = normalizeHexColor((obj as any)._originalFill || obj.fill);
         return {
           obj,
-          originalFill: (obj as any)._originalFill || fillStr,
+          originalFill: fillStr,
           originalStroke: (obj as any)._originalStroke || (typeof obj.stroke === 'string' ? obj.stroke : null),
           originalStrokeWidth: (obj as any)._originalStrokeWidth || obj.strokeWidth || 0,
           area: b.width * b.height
         };
       });
+
+      refreshColorLayers();
+      canvas.renderAll();
+      if (isWeedCheckActive) {
+        runWeedCheck();
+      }
 
       // Automatically frame remaining cropped artwork with dashed bounding box & live dimensions
       selectAllVectors();
@@ -4508,7 +4892,7 @@ export function useFabricCanvas() {
       cancelCrop();
       await renderRasterInternal(resultUrl);
     }
-  }, [activeCropType, cancelCrop, renderRasterInternal, pushUndoSnapshot, selectAllVectors]);
+  }, [activeCropType, cancelCrop, renderRasterInternal, pushUndoSnapshot, selectAllVectors, refreshColorLayers, isWeedCheckActive, runWeedCheck]);
 
   const zoomIn = useCallback(() => {
     const canvas = fabricCanvasRef.current;
@@ -4557,6 +4941,10 @@ export function useFabricCanvas() {
     loadVectorSvg,
     swapColor,
     toggleLayerVisibility,
+    toggleHideShowAll,
+    showAllVectors,
+    hideAllVectors,
+    toggleHideShowSelection,
     deleteColorLayer,
     selectedObject,
     selectedColor,
@@ -4625,6 +5013,8 @@ export function useFabricCanvas() {
     combineSelectedObjects,
     reorderColorLayers,
     flattenArtwork,
+    isFlattening,
+    activeFlattenMode,
     // Display Preferences & Units
     units,
     setUnits,

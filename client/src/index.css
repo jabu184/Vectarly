@@ -46,3 +46,12 @@ body {
     linear-gradient(to bottom, rgba(148, 163, 184, 0.2) 2px, transparent 2px);
   background-size: 20px 20px, 20px 20px, 100px 100px, 100px 100px;
 }
+
+/* Touch gesture & hands-free manipulation support */
+.canvas-container,
+.canvas-container canvas,
+.compare-stage {
+  touch-action: none;
+  -webkit-touch-callout: none;
+  user-select: none;
+}

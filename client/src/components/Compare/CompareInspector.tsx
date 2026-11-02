@@ -53,20 +53,23 @@ export const CompareInspector: React.FC<CompareInspectorProps> = ({
           </p>
         </div>
 
-        {/* Magnifier Instructions Card */}
+        {/* Navigation & Loupe Card */}
         <div className="bg-purple-50/70 border border-purple-200/80 rounded-2xl p-3.5 space-y-2">
           <div className="flex items-center gap-2 text-purple-900 font-extrabold text-xs">
             <Search className="w-4 h-4 text-purple-600" />
-            <span>Interactive Magnifying Loupe</span>
+            <span>Interactive Navigation & Loupe</span>
           </div>
           <p className="text-[11px] text-purple-800 leading-relaxed">
-            • <strong>Left-click</strong> within either image to initiate the magnifying loupe; <strong>click again</strong> to close it.
+            • <strong>Pan by Default</strong>: Left-click and drag anywhere to pan both images synchronously.
           </p>
           <p className="text-[11px] text-purple-800 leading-relaxed">
-            • <strong>Lens HUD Controls</strong>: Switch magnification quickly between 2×, 3.5×, 5×, and 8×.
+            • <strong>Double-click</strong> within either image (or click the Magnifier icon) to toggle the magnifying loupe.
           </p>
           <p className="text-[11px] text-purple-800 leading-relaxed">
-            • <strong>1:1 Sync</strong>: Scaling, stretch (Width/Height), and zoom remain 100% identical between raster and vector.
+            • <strong>Reset View</strong>: Double middle-click (or click the Eye icon) to restore default pan and zoom.
+          </p>
+          <p className="text-[11px] text-purple-800 leading-relaxed">
+            • <strong>1:1 Sync</strong>: Both images stay perfectly locked and aligned at all zoom levels.
           </p>
         </div>
 

@@ -76,7 +76,7 @@ export const Header: React.FC<HeaderProps> = ({
           type="button"
           onClick={onOpenAbout}
           className="flex items-center gap-2 group cursor-pointer border-none bg-transparent p-0 transition-transform hover:scale-[1.02] active:scale-95"
-          title="About Vectarly (v1.0)"
+          title="About Vectarly (v1.1)"
         >
           <img
             src="/vectarly-logo.png"

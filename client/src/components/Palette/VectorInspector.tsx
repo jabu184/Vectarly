@@ -28,6 +28,7 @@ import {
   ChevronDown
 } from 'lucide-react';
 import type { VectorStats, VectorLayer } from '../../services/api';
+import { areColorsMatching } from '../../services/colorUtils';
 import type { FabricObject } from 'fabric';
 import type { VinylCutSettings } from '../../services/vinylCutSettings';
 import type { WeedCheckReport } from '../../services/vinylRemediation';
@@ -174,7 +175,8 @@ export const VectorInspector: React.FC<VectorInspectorProps> = ({
   const [dragOverSwatchColor, setDragOverSwatchColor] = useState<string | null>(null);
 
   const toggleLayer = (color: string) => {
-    const nextHidden = !hiddenLayers[color];
+    const currentlyHidden = hiddenLayers[color] !== undefined ? hiddenLayers[color] : (layers.find((l) => l.color === color)?.visible === false);
+    const nextHidden = !currentlyHidden;
     setHiddenLayers((prev) => ({ ...prev, [color]: nextHidden }));
     onToggleLayerVisibility(color, !nextHidden);
   };
@@ -331,9 +333,9 @@ export const VectorInspector: React.FC<VectorInspectorProps> = ({
 
               <div className="space-y-2 max-h-56 overflow-y-auto pr-1">
                 {layers.map((layer, index) => {
-                  const isHidden = hiddenLayers[layer.color];
-                  const isSelected = selectedMatColors.some((c) => c.toUpperCase() === layer.color.toUpperCase());
-                  const isPrimary = selectedMatColors.length > 0 && selectedMatColors[0].toUpperCase() === layer.color.toUpperCase();
+                  const isHidden = hiddenLayers[layer.color] !== undefined ? hiddenLayers[layer.color] : (layer.visible === false);
+                  const isSelected = selectedMatColors.some((c) => areColorsMatching(c, layer.color));
+                  const isPrimary = selectedMatColors.length > 0 && areColorsMatching(selectedMatColors[0], layer.color);
                   const isDragging = draggedMatIndex === index;
                   const isDropTarget = dragOverMatIndex === index && draggedMatIndex !== index;
                   const isSwatchMergeTarget = dragOverSwatchColor === layer.color && draggedSwatchColor !== layer.color;
@@ -600,20 +602,22 @@ export const VectorInspector: React.FC<VectorInspectorProps> = ({
                             <button
                               type="button"
                               onClick={() => {
-                                if (onSelectBrushColor) onSelectBrushColor(layer.color);
+                                const norm = layer.color;
+                                if (onSelectBrushColor) onSelectBrushColor(norm);
+                                if (onSelectColorLayer) onSelectColorLayer(norm);
                                 onSetBrushMode(
-                                  brushMode === 'paint' && activeBrushColor?.toUpperCase() === layer.color.toUpperCase()
+                                  brushMode === 'paint' && areColorsMatching(activeBrushColor, layer.color)
                                     ? 'none'
                                     : 'paint'
                                 );
                               }}
                               className={`p-1.5 rounded-lg transition-colors cursor-pointer ${
-                                brushMode === 'paint' && activeBrushColor?.toUpperCase() === layer.color.toUpperCase()
+                                brushMode === 'paint' && areColorsMatching(activeBrushColor, layer.color)
                                   ? 'bg-indigo-600 text-white shadow-2xs'
                                   : 'text-slate-400 hover:text-indigo-600 hover:bg-indigo-50'
                               }`}
                               title={
-                                brushMode === 'paint' && activeBrushColor?.toUpperCase() === layer.color.toUpperCase()
+                                brushMode === 'paint' && areColorsMatching(activeBrushColor, layer.color)
                                   ? 'Currently Painting this mat (Click to exit)'
                                   : 'Paint on this vinyl mat'
                               }
@@ -623,20 +627,22 @@ export const VectorInspector: React.FC<VectorInspectorProps> = ({
                             <button
                               type="button"
                               onClick={() => {
-                                if (onSelectBrushColor) onSelectBrushColor(layer.color);
+                                const norm = layer.color;
+                                if (onSelectBrushColor) onSelectBrushColor(norm);
+                                if (onSelectColorLayer) onSelectColorLayer(norm);
                                 onSetBrushMode(
-                                  brushMode === 'erase' && activeBrushColor?.toUpperCase() === layer.color.toUpperCase()
+                                  brushMode === 'erase' && areColorsMatching(activeBrushColor, layer.color)
                                     ? 'none'
                                     : 'erase'
                                 );
                               }}
                               className={`p-1.5 rounded-lg transition-colors cursor-pointer ${
-                                brushMode === 'erase' && activeBrushColor?.toUpperCase() === layer.color.toUpperCase()
+                                brushMode === 'erase' && areColorsMatching(activeBrushColor, layer.color)
                                   ? 'bg-rose-600 text-white shadow-2xs'
                                   : 'text-slate-400 hover:text-rose-600 hover:bg-rose-50'
                               }`}
                               title={
-                                brushMode === 'erase' && activeBrushColor?.toUpperCase() === layer.color.toUpperCase()
+                                brushMode === 'erase' && areColorsMatching(activeBrushColor, layer.color)
                                   ? 'Currently Erasing this mat (Click to exit)'
                                   : 'Erase cuts from this vinyl mat'
                               }
@@ -646,20 +652,22 @@ export const VectorInspector: React.FC<VectorInspectorProps> = ({
                             <button
                               type="button"
                               onClick={() => {
-                                if (onSelectBrushColor) onSelectBrushColor(layer.color);
+                                const norm = layer.color;
+                                if (onSelectBrushColor) onSelectBrushColor(norm);
+                                if (onSelectColorLayer) onSelectColorLayer(norm);
                                 onSetBrushMode(
-                                  brushMode === 'fill' && activeBrushColor?.toUpperCase() === layer.color.toUpperCase()
+                                  brushMode === 'fill' && areColorsMatching(activeBrushColor, layer.color)
                                     ? 'none'
                                     : 'fill'
                                 );
                               }}
                               className={`p-1.5 rounded-lg transition-colors cursor-pointer ${
-                                brushMode === 'fill' && activeBrushColor?.toUpperCase() === layer.color.toUpperCase()
+                                brushMode === 'fill' && areColorsMatching(activeBrushColor, layer.color)
                                   ? 'bg-amber-500 text-white shadow-2xs'
                                   : 'text-slate-400 hover:text-amber-600 hover:bg-amber-50'
                               }`}
                               title={
-                                brushMode === 'fill' && activeBrushColor?.toUpperCase() === layer.color.toUpperCase()
+                                brushMode === 'fill' && areColorsMatching(activeBrushColor, layer.color)
                                   ? 'Currently in Fill mode for this mat (Click to exit)'
                                   : 'Fill closed loops on this vinyl mat'
                               }

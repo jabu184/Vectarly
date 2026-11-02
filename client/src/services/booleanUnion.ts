@@ -111,6 +111,7 @@ export function commandsToD(commands: any[]): string {
 
 /**
  * Converts polygon-clipping MultiPolygon output into a clean SVG path `d` string.
+ * Filters out microscopic degenerate slivers and collapsed seams.
  */
 export function multiPolygonToSvgD(multiPoly: number[][][][]): string {
   if (!multiPoly || multiPoly.length === 0) return '';
@@ -119,8 +120,21 @@ export function multiPolygonToSvgD(multiPoly: number[][][][]): string {
   for (const polygon of multiPoly) {
     for (const ring of polygon) {
       if (!ring || ring.length < 3) continue;
-      const cmds: string[] = [];
+
+      // Filter out microscopic clipping slivers (area < 0.5 px²)
+      let ringArea = 0;
       const len = ring.length;
+      for (let i = 0; i < len; i++) {
+        const next = (i + 1) % len;
+        ringArea += ring[i][0] * ring[next][1] - ring[next][0] * ring[i][1];
+      }
+      if (Math.abs(ringArea) * 0.5 < 0.5) {
+        continue;
+      }
+
+      const cmds: string[] = [];
+      let prevX = Infinity;
+      let prevY = Infinity;
 
       for (let i = 0; i < len; i++) {
         const pt = ring[i];
@@ -128,10 +142,19 @@ export function multiPolygonToSvgD(multiPoly: number[][][][]): string {
         if (i === len - 1 && i > 0 && pt[0] === ring[0][0] && pt[1] === ring[0][1]) {
           continue;
         }
-        cmds.push(`${i === 0 ? 'M' : 'L'} ${pt[0].toFixed(2)} ${pt[1].toFixed(2)}`);
+        const x = Number(pt[0].toFixed(2));
+        const y = Number(pt[1].toFixed(2));
+        if (cmds.length > 0 && Math.abs(x - prevX) < 0.01 && Math.abs(y - prevY) < 0.01) {
+          continue;
+        }
+        cmds.push(`${cmds.length === 0 ? 'M' : 'L'} ${x} ${y}`);
+        prevX = x;
+        prevY = y;
       }
-      cmds.push('Z');
-      parts.push(cmds.join(' '));
+      if (cmds.length > 2) {
+        cmds.push('Z');
+        parts.push(cmds.join(' '));
+      }
     }
   }
 
@@ -297,7 +320,7 @@ export type FlattenMode = 'knockout' | 'stacked';
 /**
  * Ensures that where any upper layer overlays a lower layer,
  * the lower layer is solid in that area (fills cutouts and interior holes
- * covered by upper layers, and incorporates overlaying shapes).
+ * covered by upper layers, creating solid background bases).
  */
 export function makeLayerSolidUnderOverlays(
   layerMultiPoly: number[][][][],
@@ -324,13 +347,13 @@ export function makeLayerSolidUnderOverlays(
     }
   }
 
-  // 2. Also check if upper layer polygons touch or fit into perimeter notches of this layer
+  // 2. Also incorporate upper layer polygons that overlay or touch this layer (solid stacked / overprint)
   for (const upperPoly of upperMultiPoly) {
     if (!upperPoly || upperPoly.length === 0 || !upperPoly[0] || upperPoly[0].length < 3) continue;
     const uMulti: number[][][][] = [upperPoly];
     try {
       const testUnion = (polygonClipping as any).union(currentLayer, uMulti);
-      // If the union merges (number of polygons doesn't increase by 1), it touches and fills a notch!
+      // If the union merges (number of polygons doesn't increase by 1), it touches/stacks!
       if (testUnion && testUnion.length <= currentLayer.length) {
         currentLayer = testUnion;
       }

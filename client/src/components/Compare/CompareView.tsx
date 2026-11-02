@@ -3,20 +3,19 @@ import {
   ZoomIn,
   ZoomOut,
   Columns,
-  RotateCcw,
   Sparkles,
-  Move,
   Search,
   X,
   Layers,
   Image as ImageIcon,
-  SlidersHorizontal
+  Eye
 } from 'lucide-react';
 
 interface CompareViewProps {
   rasterUrl: string | null;
   svgString: string | null;
   matBackground?: 'transparent' | 'white' | 'black';
+  onChangeMatBackground?: (bg: 'transparent' | 'white' | 'black') => void;
   onSwitchToRaster?: () => void;
   onSwitchToVector?: () => void;
   onTriggerVectorize?: () => void;
@@ -27,6 +26,7 @@ export const CompareView: React.FC<CompareViewProps> = ({
   rasterUrl,
   svgString,
   matBackground = 'transparent',
+  onChangeMatBackground,
   onSwitchToRaster,
   onSwitchToVector,
   onTriggerVectorize,
@@ -36,20 +36,39 @@ export const CompareView: React.FC<CompareViewProps> = ({
   const leftPaneRef = useRef<HTMLDivElement | null>(null);
   const rightPaneRef = useRef<HTMLDivElement | null>(null);
 
-  // Synchronized Pan, Zoom & Stretch State
+  // Background Preview Mode (Transparent, White, Black)
+  const [localMatBackground, setLocalMatBackground] = useState<'transparent' | 'white' | 'black'>(matBackground);
+
+  useEffect(() => {
+    setLocalMatBackground(matBackground);
+  }, [matBackground]);
+
+  const handleSelectBackground = (bg: 'transparent' | 'white' | 'black') => {
+    setLocalMatBackground(bg);
+    if (onChangeMatBackground) {
+      onChangeMatBackground(bg);
+    }
+  };
+
+  // Synchronized Pan & Zoom State
   const [zoom, setZoom] = useState<number>(1.0);
   const [pan, setPan] = useState<{ x: number; y: number }>({ x: 0, y: 0 });
-  const [stretch, setStretch] = useState<{ x: number; y: number }>({ x: 1.0, y: 1.0 });
-  const [showStretchMenu, setShowStretchMenu] = useState<boolean>(false);
 
-  // Pan Dragging State (Middle-click or Hand tool)
-  const [isPanning, setIsPanning] = useState<boolean>(false);
-  const [isSpacePressed, setIsSpacePressed] = useState<boolean>(false);
-  const isPanningRef = useRef<boolean>(false);
+  // Pan Dragging State (Left-click, Middle-click, or Touch drag by default)
+  const [isDraggingPan, setIsDraggingPan] = useState<boolean>(false);
+  const isDraggingPanRef = useRef<boolean>(false);
   const lastPanPosRef = useRef<{ x: number; y: number }>({ x: 0, y: 0 });
+  const hasMiddlePannedRef = useRef<boolean>(false);
+  const lastMiddleClickTimeRef = useRef<number>(0);
+
+  // Touch Gesture Tracking for Compare View
+  const isTouchPinchingRef = useRef<boolean>(false);
+  const initialTouchDistRef = useRef<number>(0);
+  const initialTouchZoomRef = useRef<number>(1.0);
+  const lastTouchPosRef = useRef<{ x: number; y: number }>({ x: 0, y: 0 });
 
   // Magnifying Glass Loupe State (OFF by default)
-  // Left-click initiates the magnifying glass; a subsequent left-click closes it
+  // Double-clicking either pane toggles the magnifying glass on/off
   const [isMagnifierVisible, setIsMagnifierVisible] = useState<boolean>(false);
   const [magnifierZoom, setMagnifierZoom] = useState<number>(3.5);
   const [mousePos, setMousePos] = useState<{ x: number; y: number } | null>(null);
@@ -71,22 +90,8 @@ export const CompareView: React.FC<CompareViewProps> = ({
     img.src = rasterUrl;
   }, [rasterUrl]);
 
-  // Anchor Bounding Box: Locks the visual coordinate frame of the artwork on initial load.
-  // When the user deletes objects (e.g. removes white background), moves objects, or resizes objects in Vector Studio,
-  // this anchor box remains locked so the remaining vector artwork maintains its exact 1:1 relative positioning with the raster image.
-  const anchorBoxRef = useRef<{ minX: number; minY: number; width: number; height: number } | null>(null);
-  const lastRasterUrlRef = useRef<string | null>(null);
-
-  // If a new raster image is loaded, reset the anchor box
-  if (lastRasterUrlRef.current !== rasterUrl) {
-    lastRasterUrlRef.current = rasterUrl;
-    anchorBoxRef.current = null;
-  }
-
   // Normalize SVG Data URL:
-  // Preserves the master anchor viewBox established from the artwork frame.
-  // This guarantees that deletions (e.g. removing white background), moving, and resizing
-  // maintain exact 1:1 relative positioning and spatial alignment with the raster image.
+  // Preserves exact viewBox and aspect ratio so vector artwork aligns 1:1 with raster image
   const svgDataUrl = useMemo(() => {
     if (!svgString || svgString.trim().length === 0) return null;
     try {
@@ -94,46 +99,7 @@ export const CompareView: React.FC<CompareViewProps> = ({
       const doc = parser.parseFromString(svgString, 'image/svg+xml');
       const svgEl = doc.querySelector('svg');
       if (svgEl) {
-        // Measure initial anchor box once on initial load if not already locked
-        if (!anchorBoxRef.current && typeof document !== 'undefined') {
-          const tempDiv = document.createElement('div');
-          tempDiv.style.position = 'fixed';
-          tempDiv.style.left = '-9999px';
-          tempDiv.style.top = '-9999px';
-          tempDiv.style.visibility = 'hidden';
-          tempDiv.style.pointerEvents = 'none';
-          tempDiv.innerHTML = svgString;
-          document.body.appendChild(tempDiv);
-          try {
-            const attachedSvg = tempDiv.querySelector('svg');
-            if (attachedSvg) {
-              const g = document.createElementNS('http://www.w3.org/2000/svg', 'g');
-              while (attachedSvg.firstChild) {
-                g.appendChild(attachedSvg.firstChild);
-              }
-              attachedSvg.appendChild(g);
-              const bbox = g.getBBox();
-              if (bbox.width > 5 && bbox.height > 5) {
-                anchorBoxRef.current = {
-                  minX: Math.floor(bbox.x),
-                  minY: Math.floor(bbox.y),
-                  width: Math.ceil(bbox.width),
-                  height: Math.ceil(bbox.height)
-                };
-              }
-            }
-          } catch {
-            // getBBox fallback
-          } finally {
-            document.body.removeChild(tempDiv);
-          }
-        }
-
-        // Apply locked anchor box or fallback to existing viewBox / naturalDims
-        if (anchorBoxRef.current) {
-          const ab = anchorBoxRef.current;
-          svgEl.setAttribute('viewBox', `${ab.minX} ${ab.minY} ${ab.width} ${ab.height}`);
-        } else if (!svgEl.getAttribute('viewBox')) {
+        if (!svgEl.getAttribute('viewBox')) {
           const w = svgEl.getAttribute('width') || String(naturalDims.width);
           const h = svgEl.getAttribute('height') || String(naturalDims.height);
           svgEl.setAttribute('viewBox', `0 0 ${parseFloat(w)} ${parseFloat(h)}`);
@@ -141,7 +107,7 @@ export const CompareView: React.FC<CompareViewProps> = ({
 
         svgEl.setAttribute('width', '100%');
         svgEl.setAttribute('height', '100%');
-        svgEl.setAttribute('preserveAspectRatio', 'none');
+        svgEl.setAttribute('preserveAspectRatio', 'xMidYMid meet');
         const serialized = new XMLSerializer().serializeToString(svgEl);
         return `data:image/svg+xml;utf8,${encodeURIComponent(serialized)}`;
       }
@@ -150,46 +116,43 @@ export const CompareView: React.FC<CompareViewProps> = ({
     }
     if (svgString.startsWith('data:')) return svgString;
     return `data:image/svg+xml;utf8,${encodeURIComponent(svgString)}`;
-  }, [svgString, naturalDims, rasterUrl]);
+  }, [svgString, naturalDims]);
 
   // Compute fixed baseline frame dimensions fitting a 460px maximum box while preserving exact aspect ratio
   const BASE_MAX = 460;
   const frameDimensions = useMemo(() => {
-    const aspect = naturalDims.width / naturalDims.height;
+    const w = naturalDims.width || 500;
+    const h = naturalDims.height || 500;
+    const aspect = w / h;
     if (aspect >= 1) {
       return {
         width: BASE_MAX,
-        height: Math.max(80, Math.round(BASE_MAX / aspect))
+        height: BASE_MAX / aspect
       };
     } else {
       return {
-        width: Math.max(80, Math.round(BASE_MAX * aspect)),
+        width: BASE_MAX * aspect,
         height: BASE_MAX
       };
     }
   }, [naturalDims]);
 
+  // Reset View to original 100% zoom and center (0,0 pan)
+  const handleResetView = useCallback(() => {
+    setZoom(1.0);
+    setPan({ x: 0, y: 0 });
+  }, []);
+
   // Handle Keyboard Shortcuts
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
-      if (e.code === 'Space' && !e.repeat && !(e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement)) {
-        setIsSpacePressed(true);
-      }
       if (e.key === 'Escape') {
         setIsMagnifierVisible(false);
-        setShowStretchMenu(false);
-      }
-    };
-    const handleKeyUp = (e: KeyboardEvent) => {
-      if (e.code === 'Space') {
-        setIsSpacePressed(false);
       }
     };
     window.addEventListener('keydown', handleKeyDown);
-    window.addEventListener('keyup', handleKeyUp);
     return () => {
       window.removeEventListener('keydown', handleKeyDown);
-      window.removeEventListener('keyup', handleKeyUp);
     };
   }, []);
 
@@ -209,35 +172,59 @@ export const CompareView: React.FC<CompareViewProps> = ({
   const handleResetZoom = () => {
     setZoom(1.0);
     setPan({ x: 0, y: 0 });
-    setStretch({ x: 1.0, y: 1.0 });
   };
 
-  // Synchronized Panning via Middle-Click Drag
+  // Synchronized Panning via Middle-Click Drag, Left-Click Drag, or Touch Drag
   useEffect(() => {
     const handleGlobalMouseMove = (e: MouseEvent) => {
-      if (isPanningRef.current) {
+      if (isDraggingPanRef.current) {
         e.preventDefault();
         const dx = e.clientX - lastPanPosRef.current.x;
         const dy = e.clientY - lastPanPosRef.current.y;
+        if (Math.hypot(dx, dy) > 2) {
+          hasMiddlePannedRef.current = true;
+        }
         lastPanPosRef.current = { x: e.clientX, y: e.clientY };
         setPan((prev) => ({ x: prev.x + dx, y: prev.y + dy }));
       }
     };
 
     const handleGlobalMouseUp = (e: MouseEvent) => {
-      if (e.button === 1 || isPanningRef.current) {
-        isPanningRef.current = false;
-        setIsPanning(false);
+      if (e.button === 1) {
+        e.preventDefault();
+        if (!hasMiddlePannedRef.current) {
+          const now = Date.now();
+          const timeDiff = now - lastMiddleClickTimeRef.current;
+          if (timeDiff > 25 && timeDiff < 550) {
+            lastMiddleClickTimeRef.current = 0;
+            handleResetView();
+          } else {
+            lastMiddleClickTimeRef.current = now;
+          }
+        }
+      }
+      if (e.button === 1 || isDraggingPanRef.current) {
+        isDraggingPanRef.current = false;
+        setIsDraggingPan(false);
+      }
+    };
+
+    const handleAuxClick = (e: MouseEvent) => {
+      if (e.button === 1) {
+        e.preventDefault();
+        e.stopPropagation();
       }
     };
 
     window.addEventListener('mousemove', handleGlobalMouseMove);
     window.addEventListener('mouseup', handleGlobalMouseUp);
+    window.addEventListener('auxclick', handleAuxClick);
     return () => {
       window.removeEventListener('mousemove', handleGlobalMouseMove);
       window.removeEventListener('mouseup', handleGlobalMouseUp);
+      window.removeEventListener('auxclick', handleAuxClick);
     };
-  }, []);
+  }, [handleResetView]);
 
   // Helper: Calculate normalized cursor coordinates (0.0 to 1.0) relative to the artwork frame
   const getArtworkNormCoord = (clientX: number, clientY: number, pane: 'left' | 'right') => {
@@ -251,8 +238,8 @@ export const CompareView: React.FC<CompareViewProps> = ({
     const paneHeight = paneEl.clientHeight;
 
     // Rendered frame dimensions
-    const renderedW = frameDimensions.width * zoom * stretch.x;
-    const renderedH = frameDimensions.height * zoom * stretch.y;
+    const renderedW = frameDimensions.width * zoom;
+    const renderedH = frameDimensions.height * zoom;
 
     // Center of artwork frame in pane coordinates
     const centerX = paneWidth / 2 + pan.x;
@@ -293,46 +280,121 @@ export const CompareView: React.FC<CompareViewProps> = ({
   };
 
   const handlePaneMouseLeave = () => {
-    // If magnifier is closed, clear mouse position
     if (!isMagnifierVisible) {
       setMousePos(null);
       setActivePane(null);
     }
   };
 
-  // Left-Click Handler:
-  // - Left click initiates the magnifying glass tool
-  // - A subsequent left click closes the magnifying glass tool
-  const handlePaneMouseDown = (e: React.MouseEvent<HTMLDivElement>, pane: 'left' | 'right') => {
-    // Middle click or Space+click: start synchronized panning
-    if (e.button === 1 || (e.button === 0 && isSpacePressed)) {
+  // Left-Click & Middle-Click Handler:
+  // - Double middle-click: restores original pan (0,0) and zoom (1.0)
+  // - Left-click and Middle-click drag: pans both images simultaneously by default!
+  const handlePaneMouseDown = (e: React.MouseEvent<HTMLDivElement>) => {
+    // Middle-click (1): check double middle-click to reset view
+    if (e.button === 1) {
       e.preventDefault();
       e.stopPropagation();
-      isPanningRef.current = true;
-      setIsPanning(true);
-      lastPanPosRef.current = { x: e.clientX, y: e.clientY };
-      return;
-    }
-
-    // Left click
-    if (e.button === 0) {
-      if (isMagnifierVisible) {
-        // Subsequent left click closes the magnifying glass tool
-        setIsMagnifierVisible(false);
-        setMousePos(null);
-        setActivePane(null);
+      hasMiddlePannedRef.current = false;
+      const now = Date.now();
+      const timeDiff = now - lastMiddleClickTimeRef.current;
+      if (timeDiff > 25 && timeDiff < 550) {
+        lastMiddleClickTimeRef.current = 0;
+        handleResetView();
         return;
       }
+      lastMiddleClickTimeRef.current = now;
+    }
 
-      // Left click initiates the magnifying glass tool
+    // Left-click (0) or Middle-click (1): pan by default!
+    if (e.button === 0 || e.button === 1) {
+      e.preventDefault();
+      isDraggingPanRef.current = true;
+      setIsDraggingPan(true);
+      lastPanPosRef.current = { x: e.clientX, y: e.clientY };
+    }
+  };
+
+  // Double-Click Handler:
+  // Double left clicking switches the magnifying glass loupe ON and OFF!
+  const handlePaneDoubleClick = (e: React.MouseEvent<HTMLDivElement>, pane: 'left' | 'right') => {
+    e.preventDefault();
+    e.stopPropagation();
+    if (isMagnifierVisible) {
+      setIsMagnifierVisible(false);
+      setMousePos(null);
+      setActivePane(null);
+    } else {
       const coord = getArtworkNormCoord(e.clientX, e.clientY, pane);
       if (!coord) return;
+      setIsMagnifierVisible(true);
+      setMousePos({ x: coord.paneX, y: coord.paneY });
+      setActivePane(pane);
+    }
+  };
 
-      if (coord.isInside) {
-        setIsMagnifierVisible(true);
-        setMousePos({ x: coord.paneX, y: coord.paneY });
-        setActivePane(pane);
+  // Touch Gesture Handlers (Pinch to zoom & Touch drag to pan on hands-free/touch devices)
+  const handleStageTouchStart = (e: React.TouchEvent<HTMLDivElement>) => {
+    if (e.touches.length === 2) {
+      e.preventDefault();
+      isTouchPinchingRef.current = true;
+      const t1 = e.touches[0];
+      const t2 = e.touches[1];
+      const dist = Math.hypot(t2.clientX - t1.clientX, t2.clientY - t1.clientY);
+      initialTouchDistRef.current = dist > 0 ? dist : 1;
+      initialTouchZoomRef.current = zoom;
+      lastTouchPosRef.current = {
+        x: (t1.clientX + t2.clientX) / 2,
+        y: (t1.clientY + t2.clientY) / 2
+      };
+    } else if (e.touches.length === 1) {
+      const t = e.touches[0];
+      lastTouchPosRef.current = { x: t.clientX, y: t.clientY };
+      isDraggingPanRef.current = true;
+      setIsDraggingPan(true);
+    }
+  };
+
+  const handleStageTouchMove = (e: React.TouchEvent<HTMLDivElement>) => {
+    if (e.touches.length === 2 && isTouchPinchingRef.current) {
+      e.preventDefault();
+      const t1 = e.touches[0];
+      const t2 = e.touches[1];
+      const dist = Math.hypot(t2.clientX - t1.clientX, t2.clientY - t1.clientY);
+      const midX = (t1.clientX + t2.clientX) / 2;
+      const midY = (t1.clientY + t2.clientY) / 2;
+
+      // Pan delta
+      const dx = midX - lastTouchPosRef.current.x;
+      const dy = midY - lastTouchPosRef.current.y;
+      lastTouchPosRef.current = { x: midX, y: midY };
+      setPan((prev) => ({ x: prev.x + dx, y: prev.y + dy }));
+
+      // Pinch zoom
+      if (initialTouchDistRef.current > 0) {
+        const scale = dist / initialTouchDistRef.current;
+        let newZoom = initialTouchZoomRef.current * scale;
+        if (newZoom > 8) newZoom = 8;
+        if (newZoom < 0.2) newZoom = 0.2;
+        setZoom(Math.round(newZoom * 100) / 100);
       }
+    } else if (e.touches.length === 1 && isDraggingPanRef.current) {
+      e.preventDefault();
+      const t = e.touches[0];
+      const dx = t.clientX - lastTouchPosRef.current.x;
+      const dy = t.clientY - lastTouchPosRef.current.y;
+      lastTouchPosRef.current = { x: t.clientX, y: t.clientY };
+      setPan((prev) => ({ x: prev.x + dx, y: prev.y + dy }));
+    }
+  };
+
+  const handleStageTouchEnd = (e: React.TouchEvent<HTMLDivElement>) => {
+    if (e.touches.length < 2) {
+      isTouchPinchingRef.current = false;
+      initialTouchDistRef.current = 0;
+    }
+    if (e.touches.length === 0) {
+      isDraggingPanRef.current = false;
+      setIsDraggingPan(false);
     }
   };
 
@@ -350,8 +412,8 @@ export const CompareView: React.FC<CompareViewProps> = ({
     const paneHeight = paneEl.clientHeight;
 
     // Rendered artwork frame dimensions
-    const renderedW = frameDimensions.width * zoom * stretch.x;
-    const renderedH = frameDimensions.height * zoom * stretch.y;
+    const renderedW = frameDimensions.width * zoom;
+    const renderedH = frameDimensions.height * zoom;
 
     const centerX = paneWidth / 2 + pan.x;
     const centerY = paneHeight / 2 + pan.y;
@@ -391,17 +453,15 @@ export const CompareView: React.FC<CompareViewProps> = ({
       ref={containerRef}
       onWheel={handleWheel}
       className={`relative w-full h-full flex flex-col overflow-hidden select-none ${
-        matBackground === 'transparent'
+        localMatBackground === 'transparent'
           ? 'cricut-grid-bg'
-          : matBackground === 'white'
+          : localMatBackground === 'white'
           ? 'bg-white'
           : 'bg-slate-950'
       } ${
-        isPanning || isSpacePressed
+        isDraggingPan
           ? 'cursor-grabbing'
-          : isMagnifierVisible
-          ? 'cursor-zoom-out'
-          : 'cursor-zoom-in'
+          : 'cursor-grab'
       }`}
     >
       {/* Top Banner Status Bar */}
@@ -412,7 +472,7 @@ export const CompareView: React.FC<CompareViewProps> = ({
           </span>
           <span className="font-extrabold text-slate-800">Side-by-Side Comparison</span>
           <span className="text-[11px] text-slate-400 font-medium hidden sm:inline">
-            • 1:1 Synchronized Scale &amp; Stretch • Left-click to inspect, left-click again to close
+            • 1:1 Synchronized Scale • Drag to pan, Double-click to magnify
           </span>
         </div>
 
@@ -443,7 +503,7 @@ export const CompareView: React.FC<CompareViewProps> = ({
                 setIsMagnifierVisible(false);
               }}
               className="ml-1 text-purple-400 hover:text-purple-800 cursor-pointer p-0.5 rounded"
-              title="Close Magnifier (Esc or Left-Click)"
+              title="Close Magnifier (Esc or Double-Click)"
             >
               <X className="w-3 h-3" />
             </button>
@@ -452,14 +512,23 @@ export const CompareView: React.FC<CompareViewProps> = ({
       </div>
 
       {/* Main Dual-Pane Comparison Stage */}
-      <div className="flex-1 w-full h-full flex relative overflow-hidden">
+      <div
+        className="flex-1 w-full h-full flex relative overflow-hidden compare-stage"
+        onTouchStart={handleStageTouchStart}
+        onTouchMove={handleStageTouchMove}
+        onTouchEnd={handleStageTouchEnd}
+        onTouchCancel={handleStageTouchEnd}
+      >
         {/* LEFT PANE: RASTER SOURCE */}
         <div
           ref={leftPaneRef}
           onMouseMove={(e) => handlePaneMouseMove(e, 'left')}
-          onMouseDown={(e) => handlePaneMouseDown(e, 'left')}
+          onMouseDown={handlePaneMouseDown}
+          onDoubleClick={(e) => handlePaneDoubleClick(e, 'left')}
           onMouseLeave={handlePaneMouseLeave}
-          className="flex-1 h-full relative overflow-hidden flex items-center justify-center border-r border-slate-300"
+          className={`flex-1 h-full relative overflow-hidden flex items-center justify-center ${
+            isDraggingPan ? 'cursor-grabbing' : 'cursor-grab'
+          }`}
         >
           {/* Header Tag */}
           <div className="absolute top-3 left-3 z-10 flex items-center gap-1.5 bg-white/95 backdrop-blur-md px-2.5 py-1 rounded-xl border border-slate-200 shadow-xs pointer-events-none">
@@ -472,15 +541,15 @@ export const CompareView: React.FC<CompareViewProps> = ({
             )}
           </div>
 
-          {/* Raster Artwork Content Frame (Exact Synchronized Scale & Stretch) */}
+          {/* Raster Artwork Content Frame (Exact Synchronized Scale) */}
           <div
             style={{
-              width: `${frameDimensions.width * stretch.x}px`,
-              height: `${frameDimensions.height * stretch.y}px`,
+              width: `${frameDimensions.width}px`,
+              height: `${frameDimensions.height}px`,
               transform: `translate(${pan.x}px, ${pan.y}px) scale(${zoom})`,
               transformOrigin: 'center center'
             }}
-            className="flex items-center justify-center pointer-events-none transition-transform duration-75 ease-out shadow-md rounded-sm bg-white/20"
+            className="flex items-center justify-center pointer-events-none transition-transform duration-75 ease-out rounded-sm"
           >
             {rasterUrl ? (
               <img
@@ -490,7 +559,7 @@ export const CompareView: React.FC<CompareViewProps> = ({
                 style={{
                   width: '100%',
                   height: '100%',
-                  objectFit: 'fill'
+                  objectFit: 'contain'
                 }}
                 className="pointer-events-none rounded-sm"
               />
@@ -511,7 +580,13 @@ export const CompareView: React.FC<CompareViewProps> = ({
                 width: LENS_DIAMETER,
                 height: LENS_DIAMETER
               }}
-              className="absolute pointer-events-none -translate-x-1/2 -translate-y-1/2 rounded-full border-2 border-emerald-500 shadow-2xl overflow-hidden bg-white/90 z-30 ring-4 ring-black/20"
+              className={`absolute pointer-events-none -translate-x-1/2 -translate-y-1/2 rounded-full border-2 border-emerald-500 shadow-2xl overflow-hidden z-30 ring-4 ring-black/20 ${
+                localMatBackground === 'transparent'
+                  ? 'cricut-grid-bg bg-white'
+                  : localMatBackground === 'white'
+                  ? 'bg-white'
+                  : 'bg-slate-950'
+              }`}
             >
               {/* Magnified Image Inside Lens */}
               <div
@@ -531,7 +606,7 @@ export const CompareView: React.FC<CompareViewProps> = ({
                   style={{
                     width: '100%',
                     height: '100%',
-                    objectFit: 'fill',
+                    objectFit: 'contain',
                     imageRendering: 'pixelated'
                   }}
                 />
@@ -551,7 +626,8 @@ export const CompareView: React.FC<CompareViewProps> = ({
           )}
         </div>
 
-        {/* CENTER DIVIDER BADGE */}
+        {/* CENTER DIVIDER LINE & BADGE */}
+        <div className="absolute top-0 bottom-0 left-1/2 -translate-x-1/2 w-px bg-slate-300 z-10 pointer-events-none" />
         <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 z-20 pointer-events-none">
           <div className="w-7 h-7 rounded-full bg-white border border-slate-300 shadow-md flex items-center justify-center text-[10px] font-extrabold text-slate-600 uppercase tracking-tighter">
             vs
@@ -562,9 +638,12 @@ export const CompareView: React.FC<CompareViewProps> = ({
         <div
           ref={rightPaneRef}
           onMouseMove={(e) => handlePaneMouseMove(e, 'right')}
-          onMouseDown={(e) => handlePaneMouseDown(e, 'right')}
+          onMouseDown={handlePaneMouseDown}
+          onDoubleClick={(e) => handlePaneDoubleClick(e, 'right')}
           onMouseLeave={handlePaneMouseLeave}
-          className="flex-1 h-full relative overflow-hidden flex items-center justify-center"
+          className={`flex-1 h-full relative overflow-hidden flex items-center justify-center ${
+            isDraggingPan ? 'cursor-grabbing' : 'cursor-grab'
+          }`}
         >
           {/* Header Tag */}
           <div className="absolute top-3 left-3 z-10 flex items-center gap-1.5 bg-white/95 backdrop-blur-md px-2.5 py-1 rounded-xl border border-slate-200 shadow-xs pointer-events-none">
@@ -577,15 +656,15 @@ export const CompareView: React.FC<CompareViewProps> = ({
             )}
           </div>
 
-          {/* Vector Artwork Content Frame (Exact Synchronized Scale & Stretch) */}
+          {/* Vector Artwork Content Frame (Exact Synchronized Scale) */}
           <div
             style={{
-              width: `${frameDimensions.width * stretch.x}px`,
-              height: `${frameDimensions.height * stretch.y}px`,
+              width: `${frameDimensions.width}px`,
+              height: `${frameDimensions.height}px`,
               transform: `translate(${pan.x}px, ${pan.y}px) scale(${zoom})`,
               transformOrigin: 'center center'
             }}
-            className="flex items-center justify-center pointer-events-none transition-transform duration-75 ease-out shadow-md rounded-sm bg-white/20"
+            className="flex items-center justify-center pointer-events-none transition-transform duration-75 ease-out rounded-sm"
           >
             {svgDataUrl ? (
               <img
@@ -595,7 +674,7 @@ export const CompareView: React.FC<CompareViewProps> = ({
                 style={{
                   width: '100%',
                   height: '100%',
-                  objectFit: 'fill'
+                  objectFit: 'contain'
                 }}
                 className="pointer-events-none rounded-sm"
               />
@@ -632,7 +711,13 @@ export const CompareView: React.FC<CompareViewProps> = ({
                 width: LENS_DIAMETER,
                 height: LENS_DIAMETER
               }}
-              className="absolute pointer-events-none -translate-x-1/2 -translate-y-1/2 rounded-full border-2 border-indigo-500 shadow-2xl overflow-hidden bg-white/90 z-30 ring-4 ring-black/20"
+              className={`absolute pointer-events-none -translate-x-1/2 -translate-y-1/2 rounded-full border-2 border-indigo-500 shadow-2xl overflow-hidden z-30 ring-4 ring-black/20 ${
+                localMatBackground === 'transparent'
+                  ? 'cricut-grid-bg bg-white'
+                  : localMatBackground === 'white'
+                  ? 'bg-white'
+                  : 'bg-slate-950'
+              }`}
             >
               {/* Magnified Image Inside Lens */}
               <div
@@ -652,7 +737,7 @@ export const CompareView: React.FC<CompareViewProps> = ({
                   style={{
                     width: '100%',
                     height: '100%',
-                    objectFit: 'fill'
+                    objectFit: 'contain'
                   }}
                 />
               </div>
@@ -672,152 +757,107 @@ export const CompareView: React.FC<CompareViewProps> = ({
         </div>
       </div>
 
-      {/* Floating Bottom Toolbar for Locked Zoom, Synchronized Stretch & Magnifier Controls */}
+      {/* Floating Bottom Toolbar for Locked Zoom, Reset View (Eye), Background Mode & Magnifier */}
       <div className="absolute bottom-4 left-1/2 -translate-x-1/2 z-20 flex items-center bg-white/95 backdrop-blur-md rounded-2xl border border-slate-200 shadow-xl px-2.5 py-1.5 gap-2 select-none">
-        {/* Pan Hand Tool Indicator */}
-        <button
-          onClick={() => setIsPanning(!isPanning)}
-          className={`p-1.5 rounded-xl transition-colors cursor-pointer flex items-center gap-1 text-xs font-bold ${
-            isPanning ? 'bg-indigo-50 text-indigo-700 border border-indigo-200' : 'text-slate-600 hover:bg-slate-100'
-          }`}
-          title="Pan locked view (or drag with Middle Mouse Button)"
-        >
-          <Move className="w-3.5 h-3.5" />
-          <span className="hidden sm:inline">Pan</span>
-        </button>
-
-        <div className="h-4 w-px bg-slate-200" />
-
-        {/* Magnifier Toggle Button */}
-        <button
-          onClick={() => setIsMagnifierVisible(!isMagnifierVisible)}
-          className={`px-2.5 py-1.5 rounded-xl transition-colors cursor-pointer flex items-center gap-1 text-xs font-bold ${
-            isMagnifierVisible
-              ? 'bg-purple-600 text-white shadow-2xs'
-              : 'text-slate-600 hover:bg-slate-100'
-          }`}
-          title="Toggle Magnifying Glass (Left-click image to inspect, left-click again to close)"
-        >
-          <Search className="w-3.5 h-3.5" />
-          <span>{isMagnifierVisible ? `${magnifierZoom.toFixed(1)}× Lens` : 'Magnifier'}</span>
-        </button>
-
-        <div className="h-4 w-px bg-slate-200" />
-
-        {/* Synchronized Stretch Adjustment Popover Toggle */}
-        <div className="relative">
+        {/* Background Preview Mode Toggle (Transparent / White / Black) */}
+        <div className="flex items-center bg-slate-100 p-0.5 rounded-xl border border-slate-200/80 mr-1">
           <button
-            onClick={() => setShowStretchMenu(!showStretchMenu)}
-            className={`p-1.5 rounded-xl transition-colors cursor-pointer flex items-center gap-1 text-xs font-bold ${
-              stretch.x !== 1.0 || stretch.y !== 1.0
-                ? 'bg-amber-50 text-amber-700 border border-amber-200'
-                : 'text-slate-600 hover:bg-slate-100'
+            type="button"
+            onClick={() => handleSelectBackground('transparent')}
+            className={`px-2 py-1 rounded-lg text-[10px] font-bold transition-all cursor-pointer flex items-center gap-1 ${
+              localMatBackground === 'transparent'
+                ? 'bg-white text-indigo-600 shadow-2xs'
+                : 'text-slate-500 hover:text-slate-700'
             }`}
-            title="Adjust Synchronized Image Stretch (applies identically to both images)"
+            title="Transparent Background (Checkerboard preview)"
           >
-            <SlidersHorizontal className="w-3.5 h-3.5" />
-            <span className="hidden sm:inline">
-              Stretch {stretch.x !== 1.0 || stretch.y !== 1.0 ? `(${stretch.x.toFixed(1)}×, ${stretch.y.toFixed(1)}×)` : ''}
-            </span>
+            <span className="w-2.5 h-2.5 rounded-full border border-slate-300 cricut-grid-bg inline-block" />
+            <span className="hidden sm:inline">Transp</span>
           </button>
-
-          {/* Stretch Settings Popover */}
-          {showStretchMenu && (
-            <div className="absolute bottom-10 left-1/2 -translate-x-1/2 bg-white/95 backdrop-blur-md rounded-2xl border border-slate-200 shadow-2xl p-3 w-56 space-y-3 z-30 text-xs">
-              <div className="flex items-center justify-between font-bold text-slate-800 pb-1 border-b border-slate-100">
-                <span>Synchronized Stretch</span>
-                <button
-                  onClick={() => setShowStretchMenu(false)}
-                  className="text-slate-400 hover:text-slate-600 cursor-pointer"
-                >
-                  <X className="w-3.5 h-3.5" />
-                </button>
-              </div>
-
-              {/* Stretch Width (X) */}
-              <div className="space-y-1">
-                <div className="flex items-center justify-between text-[11px] font-semibold text-slate-600">
-                  <span>Width Stretch (X):</span>
-                  <span className="font-mono text-indigo-600 font-bold">{stretch.x.toFixed(2)}×</span>
-                </div>
-                <input
-                  type="range"
-                  min="0.5"
-                  max="2.0"
-                  step="0.05"
-                  value={stretch.x}
-                  onChange={(e) => setStretch((s) => ({ ...s, x: parseFloat(e.target.value) }))}
-                  className="w-full accent-indigo-600 cursor-pointer"
-                />
-              </div>
-
-              {/* Stretch Height (Y) */}
-              <div className="space-y-1">
-                <div className="flex items-center justify-between text-[11px] font-semibold text-slate-600">
-                  <span>Height Stretch (Y):</span>
-                  <span className="font-mono text-indigo-600 font-bold">{stretch.y.toFixed(2)}×</span>
-                </div>
-                <input
-                  type="range"
-                  min="0.5"
-                  max="2.0"
-                  step="0.05"
-                  value={stretch.y}
-                  onChange={(e) => setStretch((s) => ({ ...s, y: parseFloat(e.target.value) }))}
-                  className="w-full accent-indigo-600 cursor-pointer"
-                />
-              </div>
-
-              {/* Stretch Quick Actions */}
-              <div className="flex items-center justify-between pt-1 border-t border-slate-100">
-                <button
-                  onClick={() => setStretch({ x: 1.0, y: 1.0 })}
-                  className="text-[11px] text-slate-500 hover:text-slate-800 font-bold cursor-pointer"
-                >
-                  Reset (1:1)
-                </button>
-                <div className="flex items-center gap-1">
-                  <button
-                    onClick={() => setStretch({ x: 1.25, y: 1.0 })}
-                    className="px-1.5 py-0.5 rounded bg-slate-100 hover:bg-slate-200 text-[10px] font-bold text-slate-700 cursor-pointer"
-                  >
-                    +25% W
-                  </button>
-                  <button
-                    onClick={() => setStretch({ x: 1.0, y: 1.25 })}
-                    className="px-1.5 py-0.5 rounded bg-slate-100 hover:bg-slate-200 text-[10px] font-bold text-slate-700 cursor-pointer"
-                  >
-                    +25% H
-                  </button>
-                </div>
-              </div>
-            </div>
-          )}
+          <button
+            type="button"
+            onClick={() => handleSelectBackground('white')}
+            className={`px-2 py-1 rounded-lg text-[10px] font-bold transition-all cursor-pointer flex items-center gap-1 ${
+              localMatBackground === 'white'
+                ? 'bg-white text-indigo-600 shadow-2xs'
+                : 'text-slate-500 hover:text-slate-700'
+            }`}
+            title="Solid White Mat Preview"
+          >
+            <span className="w-2.5 h-2.5 rounded-full bg-white border border-slate-300 inline-block" />
+            <span className="hidden sm:inline">White</span>
+          </button>
+          <button
+            type="button"
+            onClick={() => handleSelectBackground('black')}
+            className={`px-2 py-1 rounded-lg text-[10px] font-bold transition-all cursor-pointer flex items-center gap-1 ${
+              localMatBackground === 'black'
+                ? 'bg-white text-indigo-600 shadow-2xs'
+                : 'text-slate-500 hover:text-slate-700'
+            }`}
+            title="Solid Black Mat Preview (Ideal for white vinyl & line art)"
+          >
+            <span className="w-2.5 h-2.5 rounded-full bg-slate-900 border border-slate-700 inline-block" />
+            <span className="hidden sm:inline">Black</span>
+          </button>
         </div>
 
         <div className="h-4 w-px bg-slate-200" />
 
-        {/* Locked Zoom Controls */}
+        {/* Zoom Out */}
         <button
+          type="button"
           onClick={handleZoomOut}
           className="p-1.5 rounded-xl text-slate-600 hover:bg-slate-100 transition-colors cursor-pointer"
           title="Zoom out both views"
         >
-          <ZoomOut className="w-3.5 h-3.5" />
+          <ZoomOut className="w-4 h-4" />
         </button>
+
+        {/* Zoom Level Indicator */}
         <button
-          onClick={handleResetZoom}
+          type="button"
+          onClick={() => setZoom(1.0)}
           className="px-2 py-1 rounded-xl text-xs font-mono font-bold text-slate-700 hover:bg-slate-100 transition-colors cursor-pointer"
           title="Reset zoom to 100%"
         >
           {Math.round(zoom * 100)}%
         </button>
+
+        {/* Zoom In */}
         <button
+          type="button"
           onClick={handleZoomIn}
           className="p-1.5 rounded-xl text-slate-600 hover:bg-slate-100 transition-colors cursor-pointer"
           title="Zoom in both views"
         >
-          <ZoomIn className="w-3.5 h-3.5" />
+          <ZoomIn className="w-4 h-4" />
+        </button>
+
+        {/* Reset View / Center Artwork (Eye - Same as double middle-click) */}
+        <button
+          type="button"
+          onClick={handleResetView}
+          className="p-1.5 rounded-xl text-slate-600 hover:text-indigo-600 hover:bg-indigo-50 transition-colors cursor-pointer"
+          title="Reset View / Fit to Screen (Same as double middle-click)"
+        >
+          <Eye className="w-4 h-4" />
+        </button>
+
+        <div className="h-4 w-px bg-slate-200" />
+
+        {/* Toggle Magnifier Icon */}
+        <button
+          type="button"
+          onClick={() => setIsMagnifierVisible(!isMagnifierVisible)}
+          className={`p-1.5 rounded-xl transition-all cursor-pointer ${
+            isMagnifierVisible
+              ? 'bg-purple-600 text-white shadow-xs'
+              : 'text-slate-600 hover:bg-slate-100 hover:text-purple-600'
+          }`}
+          title={isMagnifierVisible ? 'Turn off Magnifier (Double-click image or click here)' : 'Turn on Magnifier (Double-click image or click here)'}
+        >
+          <Search className="w-4 h-4" />
         </button>
       </div>
     </div>

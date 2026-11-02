@@ -13,7 +13,9 @@ import {
   Sparkles,
   XCircle,
   X,
-  Layers
+  Layers,
+  Eye,
+  EyeOff
 } from 'lucide-react';
 import type { FabricObject } from 'fabric';
 
@@ -43,6 +45,11 @@ interface CanvasContextMenuProps {
   onSelectInverse?: () => void;
   onUnionSelection?: () => void;
   onClearSelection?: () => void;
+  onToggleHideShowAll?: () => void;
+  onShowAll?: () => void;
+  onHideAll?: () => void;
+  areAllVisible?: boolean;
+  onToggleHideShowSelection?: () => void;
 }
 
 const PRESET_VINYL_COLORS = [
@@ -69,7 +76,12 @@ export const CanvasContextMenu: React.FC<CanvasContextMenuProps> = ({
   onSelectAll,
   onSelectInverse,
   onUnionSelection,
-  onClearSelection
+  onClearSelection,
+  onToggleHideShowAll,
+  onShowAll,
+  onHideAll,
+  areAllVisible = true,
+  onToggleHideShowSelection
 }) => {
   const menuRef = useRef<HTMLDivElement>(null);
   const [internalColor, setInternalColor] = useState<string | null>(null);
@@ -124,6 +136,10 @@ export const CanvasContextMenu: React.FC<CanvasContextMenuProps> = ({
     return [targetObj];
   }, [targetObj, menuState.isOpen, menuState.x, menuState.y]);
 
+  const isSelectionHidden = useMemo(() => {
+    return selectedElements.length > 0 && selectedElements.every((o) => o.visible === false);
+  }, [selectedElements]);
+
   // Map of unique colors -> count of objects in the selection
   const { layerColorCounts, uniqueLayerColors } = useMemo(() => {
     if (internalColor) {
@@ -165,11 +181,91 @@ export const CanvasContextMenu: React.FC<CanvasContextMenuProps> = ({
     onChangeColor?.(norm);
   };
 
-  if (!menuState.isOpen || !targetObj) return null;
+  if (!menuState.isOpen) return null;
 
   // Prevent context menu from overflowing the screen boundaries
   const adjustedX = Math.max(10, Math.min(menuState.x, window.innerWidth - 240));
   const adjustedY = Math.max(10, Math.min(menuState.y, window.innerHeight - 420));
+
+  // If right-clicked anywhere on the grid view without an active element selection
+  if (!targetObj) {
+    return (
+      <div
+        ref={menuRef}
+        style={{
+          position: 'fixed',
+          left: `${adjustedX}px`,
+          top: `${adjustedY}px`,
+          zIndex: 99999
+        }}
+        className="w-52 bg-white/95 backdrop-blur-md border border-slate-200 rounded-2xl shadow-2xl py-1.5 text-xs text-slate-700 animate-in fade-in zoom-in-95 duration-100 select-none"
+        onClick={(e) => e.stopPropagation()}
+        onContextMenu={(e) => e.preventDefault()}
+      >
+        <div className="px-3 py-1.5 border-b border-slate-100 flex items-center justify-between">
+          <span className="font-bold text-slate-500 uppercase tracking-wider text-[10px]">
+            Grid View
+          </span>
+          <button
+            onClick={onClose}
+            className="text-slate-400 hover:text-slate-600 text-xs p-0.5 rounded cursor-pointer ml-1 leading-none"
+            title="Close menu"
+          >
+            <X className="w-3.5 h-3.5" />
+          </button>
+        </div>
+
+        <div className="py-1">
+          {(onShowAll || onToggleHideShowAll) && (
+            <button
+              onClick={() => {
+                if (onShowAll) onShowAll();
+                else if (onToggleHideShowAll) onToggleHideShowAll();
+                onClose();
+              }}
+              className="w-full px-3 py-2 flex items-center gap-2.5 hover:bg-indigo-50 hover:text-indigo-600 transition-colors cursor-pointer text-left font-semibold text-slate-800"
+            >
+              <Eye className="w-4 h-4 text-indigo-500" />
+              <span>Show All</span>
+              {!areAllVisible && (
+                <span className="ml-auto text-[9px] text-amber-600 font-bold bg-amber-50 px-1.5 py-0.5 rounded">
+                  Hidden
+                </span>
+              )}
+            </button>
+          )}
+
+          {(onHideAll || onToggleHideShowAll) && (
+            <button
+              onClick={() => {
+                if (onHideAll) onHideAll();
+                else if (onToggleHideShowAll) onToggleHideShowAll();
+                onClose();
+              }}
+              className="w-full px-3 py-1.5 flex items-center gap-2.5 hover:bg-slate-50 hover:text-slate-700 transition-colors cursor-pointer text-left font-medium text-slate-600"
+            >
+              <EyeOff className="w-4 h-4 text-slate-400" />
+              <span>Hide All</span>
+            </button>
+          )}
+
+          {onSelectAll && (
+            <button
+              onClick={() => {
+                onSelectAll();
+                onClose();
+              }}
+              className="w-full px-3 py-1.5 flex items-center gap-2.5 hover:bg-indigo-50 hover:text-indigo-600 transition-colors cursor-pointer text-left font-medium text-slate-700"
+            >
+              <CheckCheck className="w-4 h-4 text-indigo-500" />
+              <span>Select All</span>
+              <span className="ml-auto text-[10px] text-slate-400 font-mono">Ctrl+A</span>
+            </button>
+          )}
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div
@@ -294,6 +390,65 @@ export const CanvasContextMenu: React.FC<CanvasContextMenuProps> = ({
             {selectedElements.length >= 2 && (
               <span className="ml-auto text-[10px] text-slate-400 font-mono">({selectedElements.length})</span>
             )}
+          </button>
+        )}
+      </div>
+
+      {/* Visibility Controls */}
+      <div className="my-1 border-t border-slate-100" />
+      <div className="py-1">
+        {(onShowAll || onToggleHideShowAll) && (
+          <button
+            onClick={() => {
+              if (onShowAll) onShowAll();
+              else if (onToggleHideShowAll) onToggleHideShowAll();
+              onClose();
+            }}
+            className="w-full px-3 py-1.5 flex items-center gap-2.5 hover:bg-indigo-50 hover:text-indigo-600 transition-colors cursor-pointer text-left font-medium text-slate-700"
+          >
+            <Eye className="w-4 h-4 text-indigo-500" />
+            <span>Show All</span>
+            {!areAllVisible && (
+              <span className="ml-auto text-[9px] text-amber-600 font-bold bg-amber-50 px-1.5 py-0.5 rounded">
+                Hidden
+              </span>
+            )}
+          </button>
+        )}
+
+        {onToggleHideShowSelection && (
+          <button
+            onClick={() => {
+              onToggleHideShowSelection();
+              onClose();
+            }}
+            className="w-full px-3 py-1.5 flex items-center gap-2.5 hover:bg-indigo-50 hover:text-indigo-600 transition-colors cursor-pointer text-left font-medium text-slate-700"
+          >
+            {isSelectionHidden ? (
+              <>
+                <Eye className="w-4 h-4 text-indigo-500" />
+                <span>Show Selection</span>
+              </>
+            ) : (
+              <>
+                <EyeOff className="w-4 h-4 text-slate-400" />
+                <span>Hide Selection</span>
+              </>
+            )}
+          </button>
+        )}
+
+        {(onHideAll || onToggleHideShowAll) && (
+          <button
+            onClick={() => {
+              if (onHideAll) onHideAll();
+              else if (onToggleHideShowAll) onToggleHideShowAll();
+              onClose();
+            }}
+            className="w-full px-3 py-1.5 flex items-center gap-2.5 hover:bg-slate-50 hover:text-slate-700 transition-colors cursor-pointer text-left font-medium text-slate-600"
+          >
+            <EyeOff className="w-4 h-4 text-slate-400" />
+            <span>Hide All</span>
           </button>
         )}
       </div>

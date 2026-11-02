@@ -9,6 +9,7 @@ import { CompareInspector } from './components/Compare/CompareInspector';
 import { SettingsModal } from './components/SettingsModal';
 import { ExportModal } from './components/ExportModal';
 import { AboutModal } from './components/AboutModal';
+import { FlattenProgressOverlay } from './components/Canvas/FlattenProgressOverlay';
 import { CanvasContextMenu } from './components/Canvas/CanvasContextMenu';
 import { getStoredCustomColors } from './services/customPalette';
 import { type PenInfillOptions } from './services/penInfill';
@@ -33,12 +34,17 @@ export function App() {
     zoomIn,
     zoomOut,
     resetZoom,
+    recenterArtwork,
     hasImage,
     hasVector,
     loadRasterImage,
     loadVectorSvg,
     swapColor,
     toggleLayerVisibility,
+    toggleHideShowAll,
+    showAllVectors,
+    hideAllVectors,
+    toggleHideShowSelection,
     deleteColorLayer,
     selectedObject,
     selectedColor,
@@ -110,6 +116,8 @@ export function App() {
     combineSelectedObjects,
     reorderColorLayers,
     flattenArtwork,
+    isFlattening,
+    activeFlattenMode,
     // Vinyl Cutting Readiness & Weed Check Engine
     vinylSettings,
     setVinylSettings,
@@ -497,6 +505,8 @@ export function App() {
           onSendToBack={sendToBack}
           onBringForward={bringForward}
           onSendBackward={sendBackward}
+          selectedObject={selectedObject}
+          onRecenterView={recenterArtwork}
           onDeleteSelected={deleteSelectedObject}
           onDuplicateSelected={duplicateSelectedObject}
           onCombineSelected={combineSelectedObjects}
@@ -674,6 +684,12 @@ export function App() {
         onClose={() => setIsAboutOpen(false)}
       />
 
+      {/* Flatten Progress Popup Prompt */}
+      <FlattenProgressOverlay
+        isFlattening={isFlattening}
+        mode={activeFlattenMode}
+      />
+
       {/* Unified Right-Click Context Menu for Canvas Elements & Active Mat Cards */}
       {contextMenuState.isOpen && (
         <CanvasContextMenu
@@ -691,6 +707,11 @@ export function App() {
           onSelectInverse={selectInverseVectors}
           onUnionSelection={combineSelectedObjects}
           onClearSelection={clearSelection}
+          onToggleHideShowAll={toggleHideShowAll}
+          onShowAll={showAllVectors}
+          onHideAll={hideAllVectors}
+          areAllVisible={colorLayers.length > 0 ? colorLayers.every((l) => l.visible !== false) : true}
+          onToggleHideShowSelection={toggleHideShowSelection}
           currentColor={selectedColor || null}
           selectedColors={selectedLayerColors}
           customColors={customColors}
