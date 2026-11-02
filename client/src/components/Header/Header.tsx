@@ -13,7 +13,9 @@ import {
   FolderHeart,
   FileText,
   Sliders,
-  Columns
+  Columns,
+  FolderOpen,
+  Save
 } from 'lucide-react';
 import type { CanvasMode } from '../../hooks/useFabricCanvas';
 import confetti from 'canvas-confetti';
@@ -32,6 +34,8 @@ interface HeaderProps {
   onExportLineArt: () => void;
   onOpenExportModal?: () => void;
   onSelectSample: (sampleKey: string) => void;
+  onSaveProject?: () => void;
+  onOpenProject?: () => void;
   stats?: {
     pathCount: number;
     colorCount: number;
@@ -53,6 +57,8 @@ export const Header: React.FC<HeaderProps> = ({
   onExportLineArt,
   onOpenExportModal,
   onSelectSample,
+  onSaveProject,
+  onOpenProject,
   stats
 }) => {
   const [exportOpen, setExportOpen] = useState(false);
@@ -76,7 +82,7 @@ export const Header: React.FC<HeaderProps> = ({
           type="button"
           onClick={onOpenAbout}
           className="flex items-center gap-2 group cursor-pointer border-none bg-transparent p-0 transition-transform hover:scale-[1.02] active:scale-95"
-          title="About Vectarly (v1.1)"
+          title="About Vectarly (v1.11)"
         >
           <img
             src="/vectarly-logo.png"
@@ -109,8 +115,9 @@ export const Header: React.FC<HeaderProps> = ({
               ? 'bg-white text-indigo-600 shadow-sm cursor-pointer'
               : hasVector
               ? 'text-craft-muted hover:text-craft-text cursor-pointer'
-              : 'text-slate-400 cursor-not-allowed opacity-60'
+              : 'text-slate-400 cursor-not-allowed opacity-50'
           }`}
+          title={!hasVector ? 'Convert to SVG Vectors first to open Vector Studio' : 'Vector Studio'}
         >
           <PenTool className="w-3.5 h-3.5" />
           <span>Vector Studio</span>
@@ -118,15 +125,15 @@ export const Header: React.FC<HeaderProps> = ({
 
         <button
           onClick={() => setMode('compare')}
-          disabled={!hasImage && !hasVector}
+          disabled={!hasVector || !hasImage}
           className={`flex items-center gap-1.5 px-3.5 py-1.5 rounded-lg text-xs font-semibold transition-all ${
             mode === 'compare'
               ? 'bg-white text-purple-600 shadow-sm cursor-pointer'
-              : hasImage || hasVector
+              : hasVector && hasImage
               ? 'text-craft-muted hover:text-craft-text cursor-pointer'
-              : 'text-slate-400 cursor-not-allowed opacity-60'
+              : 'text-slate-400 cursor-not-allowed opacity-50'
           }`}
-          title="Compare raster image and vector cutlines side by side"
+          title={!hasVector || !hasImage ? 'Convert to SVG Vectors first to compare raster & vector' : 'Compare raster image and vector cutlines side by side'}
         >
           <Columns className="w-3.5 h-3.5" />
           <span>Compare</span>
@@ -135,6 +142,33 @@ export const Header: React.FC<HeaderProps> = ({
 
       {/* Right Controls & CTAs */}
       <div className="flex items-center gap-2">
+        {/* Project Save & Load Pill */}
+        <div className="flex items-center bg-slate-100 p-0.5 rounded-xl border border-slate-200/80">
+          <button
+            type="button"
+            onClick={onOpenProject}
+            className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs font-semibold text-slate-700 hover:text-indigo-600 hover:bg-white transition-all cursor-pointer shadow-2xs"
+            title="Load Project File (.vectarly, .json, .svg) from another PC or previous session (Ctrl+O)"
+          >
+            <FolderOpen className="w-3.5 h-3.5 text-indigo-600" />
+            <span className="hidden sm:inline">Load</span>
+          </button>
+          <button
+            type="button"
+            onClick={onSaveProject}
+            disabled={!hasVector && !hasImage}
+            className={`flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs font-semibold transition-all cursor-pointer ${
+              hasVector || hasImage
+                ? 'text-slate-700 hover:text-emerald-700 hover:bg-white shadow-2xs'
+                : 'text-slate-400 cursor-not-allowed opacity-50'
+            }`}
+            title="Save Complete Project (.vectarly) with all individual layers, ordering & vector elements (Ctrl+S)"
+          >
+            <Save className="w-3.5 h-3.5 text-emerald-600" />
+            <span className="hidden sm:inline">Save</span>
+          </button>
+        </div>
+
         {/* Sample Library Dropdown */}
         <div className="relative">
           <button
@@ -244,9 +278,32 @@ export const Header: React.FC<HeaderProps> = ({
                   </span>
                 </button>
               )}
-              <div className="px-3 py-1.5 border-b border-slate-100">
-                <p className="text-[11px] font-semibold text-slate-500 uppercase tracking-wider">Production Output</p>
+              <div className="px-3 py-1.5 border-b border-slate-100 flex items-center justify-between">
+                <p className="text-[11px] font-semibold text-slate-500 uppercase tracking-wider">Save &amp; Export</p>
+                <span className="text-[10px] text-indigo-600 font-mono font-bold">v1.1</span>
               </div>
+
+              {/* Vectarly Project File (.vectarly) */}
+              {onSaveProject && (
+                <button
+                  onClick={() => {
+                    setExportOpen(false);
+                    onSaveProject();
+                  }}
+                  className="w-full text-left px-3.5 py-2.5 hover:bg-indigo-50 group flex items-start gap-3 transition-colors cursor-pointer border-b border-slate-100/80"
+                >
+                  <div className="p-2 rounded-lg bg-emerald-100/60 text-emerald-600 group-hover:bg-emerald-600 group-hover:text-white transition-colors">
+                    <Save className="w-4 h-4" />
+                  </div>
+                  <div>
+                    <div className="text-xs font-bold text-craft-text flex items-center gap-1.5">
+                      <span>Vectarly Project File</span>
+                      <span className="text-[9px] bg-emerald-100 text-emerald-800 font-semibold px-1.5 py-0.2 rounded">.vectarly</span>
+                    </div>
+                    <p className="text-[11px] text-craft-muted">All layers, order, paths &amp; settings (Editable source)</p>
+                  </div>
+                </button>
+              )}
 
               {/* Cricut SVG */}
               <button

@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { Header } from './components/Header/Header';
 import { PromptBar } from './components/Toolbar/PromptBar';
 import { StudioActionBar } from './components/Toolbar/StudioActionBar';
@@ -13,7 +13,7 @@ import { FlattenProgressOverlay } from './components/Canvas/FlattenProgressOverl
 import { CanvasContextMenu } from './components/Canvas/CanvasContextMenu';
 import { getStoredCustomColors } from './services/customPalette';
 import { type PenInfillOptions } from './services/penInfill';
-import { useFabricCanvas } from './hooks/useFabricCanvas';
+import { useFabricCanvas, type CanvasMode } from './hooks/useFabricCanvas';
 import { useBackgroundRemover } from './hooks/useBackgroundRemover';
 import {
   generateImage,
@@ -69,6 +69,7 @@ export function App() {
     resetArtwork,
     switchToRasterMode,
     switchToVectorMode,
+    saveCurrentVectorSnapshot,
     // Cropping Suite
     activeCropType,
     lassoPointsCount,
@@ -138,12 +139,16 @@ export function App() {
     brushResizePos,
     outlineSmoothing,
     setOutlineSmoothing,
-    compareData
+    compareData,
+    exportProjectJSON,
+    loadProjectJSON
   } = useFabricCanvas();
 
   const { removeBg, isRemoving: isRemovingBg, progress: bgProgress, statusText: bgStatusText } = useBackgroundRemover();
 
   // App State
+  const [currentProjectName, setCurrentProjectName] = useState<string>('My Design');
+  const fileInputRef = useRef<HTMLInputElement>(null);
   const [selectedPreset, setSelectedPreset] = useState<string>('Bold Die-Cut Sticker');
   const [isGenerating, setIsGenerating] = useState<boolean>(false);
   const [activePrompt, setActivePrompt] = useState<string>('');
@@ -178,6 +183,7 @@ export function App() {
   const handleGenerate = async (prompt: string, aspectRatio: '1:1' | '4:5' | '16:9', stylePreset: string) => {
     setIsGenerating(true);
     setActivePrompt(prompt);
+    setCurrentProjectName(prompt.slice(0, 28).trim() || 'Cricut Design');
     setStatusBanner(null);
 
     try {
@@ -223,20 +229,33 @@ export function App() {
   };
 
   /**
-   * Handle Manual Image Upload
+   * Project Save & Load Engine
    */
-  const handleUploadImage = (file: File) => {
-    const reader = new FileReader();
-    reader.onload = async () => {
-      const dataUrl = reader.result as string;
-      await loadRasterImage(dataUrl, true);
-      setMode('raster');
+  const handleSaveProject = () => {
+    if (!hasVector && !hasImage) {
       setStatusBanner({
-        type: 'info',
-        message: `Imported "${file.name}". Use Rectangle, Circle, or Lasso Crop from the toolbar.`
+        type: 'warning',
+        message: 'No artwork on canvas to save yet. Import an image or generate vector cutlines first.'
       });
-    };
-    reader.readAsDataURL(file);
+      return;
+    }
+
+    const jsonStr = exportProjectJSON(currentProjectName);
+    const now = new Date();
+    const dateStr = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
+    const baseName = currentProjectName ? currentProjectName.replace(/[^a-zA-Z0-9_-]/g, '_') : 'vectarly-project';
+    const filename = `${baseName}-${dateStr}.vectarly`;
+
+    triggerDownload(jsonStr, filename, 'application/json');
+    confetti({
+      particleCount: 40,
+      spread: 50,
+      origin: { y: 0.1 }
+    });
+    setStatusBanner({
+      type: 'success',
+      message: `Project saved as "${filename}"! You can load this file anytime or transfer it to another PC.`
+    });
   };
 
   /**
@@ -319,12 +338,134 @@ export function App() {
     }
   };
 
+  const handleOpenProject = () => {
+    if (fileInputRef.current) {
+      fileInputRef.current.value = '';
+      fileInputRef.current.click();
+    }
+  };
+
+  const handleLoadProjectFile = (file: File) => {
+    const isImage = file.type.startsWith('image/') && !file.type.includes('svg');
+    const isImageExt = /\.(png|jpe?g|webp|bmp|gif)$/i.test(file.name);
+    if (isImage || isImageExt) {
+      handleUploadImage(file);
+      return;
+    }
+
+    const reader = new FileReader();
+    reader.onload = async () => {
+      const content = reader.result as string;
+      const isSvgFile =
+        file.name.toLowerCase().endsWith('.svg') ||
+        content.trim().startsWith('<svg') ||
+        content.trim().startsWith('<?xml');
+
+      if (isSvgFile) {
+        await loadVectorSvg(content, true);
+        setMode('vector');
+        setCurrentProjectName(file.name.replace(/\.svg$/i, ''));
+        setStatusBanner({
+          type: 'success',
+          message: `Loaded SVG file "${file.name}" with full vector layers!`
+        });
+        return;
+      }
+
+      const result = await loadProjectJSON(content, mode);
+      if (result.success) {
+        if (result.mode) {
+          setMode(result.mode);
+        }
+        setCurrentProjectName(file.name.replace(/\.(vectarly|json)$/i, ''));
+        confetti({
+          particleCount: 50,
+          spread: 60,
+          origin: { y: 0.1 }
+        });
+        setStatusBanner({
+          type: 'success',
+          message: `Project "${result.title || file.name}" loaded successfully with all layers & vector paths!`
+        });
+      } else {
+        setStatusBanner({
+          type: 'warning',
+          message: `Could not load project: ${result.error || 'Invalid project file format'}`
+        });
+      }
+    };
+    reader.readAsText(file);
+  };
+
+  const handleFileInputChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (file) {
+      handleLoadProjectFile(file);
+    }
+  };
+
+  /**
+   * Handle Manual Image Upload:
+   * Imports raster image onto canvas in raster cleanup mode without auto-converting.
+   * User can click "Convert to SVG Vectors" when ready.
+   */
+  const handleUploadImage = (file: File) => {
+    if (
+      file.name.toLowerCase().endsWith('.vectarly') ||
+      file.name.toLowerCase().endsWith('.json') ||
+      file.name.toLowerCase().endsWith('.svg')
+    ) {
+      handleLoadProjectFile(file);
+      return;
+    }
+    setCurrentProjectName(file.name.replace(/\.[^/.]+$/, ''));
+    const reader = new FileReader();
+    reader.onload = async () => {
+      const dataUrl = reader.result as string;
+      await loadRasterImage(dataUrl, true);
+      setMode('raster');
+
+      setStatusBanner({
+        type: 'info',
+        message: `Imported "${file.name}". Ready to crop, vectorize & swap vinyl colors.`
+      });
+    };
+    reader.readAsDataURL(file);
+  };
+
+  /**
+   * Switch workspace mode
+   */
+  const handleSetMode = async (nextMode: CanvasMode) => {
+    if (nextMode === mode) return;
+    if (nextMode === 'raster') {
+      if (mode === 'vector') {
+        saveCurrentVectorSnapshot();
+      }
+      if (hasImage) {
+        await switchToRasterMode();
+      }
+      setMode('raster');
+    } else if (nextMode === 'vector') {
+      if (hasVector) {
+        await switchToVectorMode();
+      }
+      setMode('vector');
+    } else if (nextMode === 'compare') {
+      if (mode === 'vector') {
+        saveCurrentVectorSnapshot();
+      }
+      setMode('compare');
+    }
+  };
+
   /**
    * Load Curated Samples
    */
   const handleSelectSample = async (sampleKey: string, isInitialMount = false) => {
     try {
       if (sampleKey === 'vectarly') {
+        setCurrentProjectName('Vectarly Logo');
         await loadRasterImage('/samples/vectarly-logo.jpg', !isInitialMount);
         setMode('raster');
         setStatusBanner({
@@ -337,6 +478,7 @@ export function App() {
       const data = await fetchSamples();
       const sample = data.samples[sampleKey];
       if (sample) {
+        setCurrentProjectName(sample.title || sampleKey);
         await loadRasterImage(sample.dataUrl, true);
         setMode('raster');
         setStatusBanner({
@@ -412,6 +554,25 @@ export function App() {
     }, 100);
   };
 
+  // Global Keyboard Shortcuts (Ctrl+S / Cmd+S for Save, Ctrl+O / Cmd+O for Open)
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      const isMac = navigator.platform.toUpperCase().indexOf('MAC') >= 0;
+      const isCmdOrCtrl = isMac ? e.metaKey : e.ctrlKey;
+
+      if (isCmdOrCtrl && (e.key === 's' || e.key === 'S')) {
+        e.preventDefault();
+        handleSaveProject();
+      } else if (isCmdOrCtrl && (e.key === 'o' || e.key === 'O')) {
+        e.preventDefault();
+        handleOpenProject();
+      }
+    };
+
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [hasVector, hasImage, currentProjectName, exportProjectJSON]);
+
   // On first mount, load Vectarly logo sample
   useEffect(() => {
     handleSelectSample('vectarly', true);
@@ -419,10 +580,19 @@ export function App() {
 
   return (
     <div className="flex flex-col h-screen w-screen overflow-hidden bg-craft-bg text-craft-text select-none">
+      {/* Hidden File Input for Loading Projects (.vectarly, .json, .svg, and images) */}
+      <input
+        type="file"
+        ref={fileInputRef}
+        accept=".vectarly,.json,.svg,.png,.jpg,.jpeg,.webp,image/*,application/json,image/svg+xml"
+        onChange={handleFileInputChange}
+        className="hidden"
+      />
+
       {/* Top Header */}
       <Header
         mode={mode}
-        setMode={setMode}
+        setMode={handleSetMode}
         hasVector={hasVector}
         hasImage={hasImage}
         onOpenSettings={() => setIsSettingsOpen(true)}
@@ -434,6 +604,8 @@ export function App() {
         onExportLineArt={handleExportLineArt}
         onOpenExportModal={() => setIsExportOpen(true)}
         onSelectSample={handleSelectSample}
+        onSaveProject={handleSaveProject}
+        onOpenProject={handleOpenProject}
         stats={vectorStats}
       />
 

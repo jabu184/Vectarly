@@ -69,10 +69,16 @@ export const CompareView: React.FC<CompareViewProps> = ({
 
   // Magnifying Glass Loupe State (OFF by default)
   // Double-clicking either pane toggles the magnifying glass on/off
+  // Dragging from within the loupe moves the magnifier; dragging outside pans both images
   const [isMagnifierVisible, setIsMagnifierVisible] = useState<boolean>(false);
   const [magnifierZoom, setMagnifierZoom] = useState<number>(3.5);
   const [mousePos, setMousePos] = useState<{ x: number; y: number } | null>(null);
   const [activePane, setActivePane] = useState<'left' | 'right' | null>(null);
+  const isDraggingLensRef = useRef<boolean>(false);
+  const [isDraggingLens, setIsDraggingLens] = useState<boolean>(false);
+  const dragLensPaneRef = useRef<'left' | 'right' | null>(null);
+  const dragLensOffsetRef = useRef<{ x: number; y: number }>({ x: 0, y: 0 });
+  const [isHoveringLens, setIsHoveringLens] = useState<boolean>(false);
 
   // Measure natural dimensions of the raster image to ensure exact 1-to-1 aspect ratio and scaling
   const [naturalDims, setNaturalDims] = useState<{ width: number; height: number }>({ width: 500, height: 500 });
@@ -99,10 +105,87 @@ export const CompareView: React.FC<CompareViewProps> = ({
       const doc = parser.parseFromString(svgString, 'image/svg+xml');
       const svgEl = doc.querySelector('svg');
       if (svgEl) {
-        if (!svgEl.getAttribute('viewBox')) {
+        let vb = svgEl.getAttribute('viewBox');
+        if (!vb) {
           const w = svgEl.getAttribute('width') || String(naturalDims.width);
           const h = svgEl.getAttribute('height') || String(naturalDims.height);
-          svgEl.setAttribute('viewBox', `0 0 ${parseFloat(w)} ${parseFloat(h)}`);
+          vb = `0 0 ${parseFloat(w)} ${parseFloat(h)}`;
+          svgEl.setAttribute('viewBox', vb);
+        }
+
+        // Parse viewBox values: [x, y, width, height]
+        const vbParts = vb.trim().split(/[\s,]+/).map(Number);
+        const vbWidth = vbParts.length === 4 ? vbParts[2] : parseFloat(svgEl.getAttribute('width') || '500');
+        const vbHeight = vbParts.length === 4 ? vbParts[3] : parseFloat(svgEl.getAttribute('height') || '500');
+
+        // Check if this SVG came from a full-canvas Fabric export (700x600 default) with excess empty margin
+        const isCanvasExport = (Math.abs(vbWidth - 700) < 5 && Math.abs(vbHeight - 600) < 5) || (vbWidth >= 600 && vbHeight >= 500);
+
+        if (isCanvasExport) {
+          // Inspect path coordinates to tightly crop out empty canvas borders
+          const elements = svgEl.querySelectorAll('path, rect, polygon, circle, ellipse');
+          if (elements.length > 0) {
+            let minX = Infinity;
+            let minY = Infinity;
+            let maxX = -Infinity;
+            let maxY = -Infinity;
+
+            elements.forEach((el) => {
+              const d = el.getAttribute('d');
+              if (d) {
+                const nums = d.match(/[-+]?[0-9]*\.?[0-9]+(?:[eE][-+]?[0-9]+)?/g);
+                if (nums && nums.length >= 2) {
+                  for (let i = 0; i < nums.length - 1; i += 2) {
+                    const x = parseFloat(nums[i]);
+                    const y = parseFloat(nums[i + 1]);
+                    if (!isNaN(x) && !isNaN(y)) {
+                      minX = Math.min(minX, x);
+                      minY = Math.min(minY, y);
+                      maxX = Math.max(maxX, x);
+                      maxY = Math.max(maxY, y);
+                    }
+                  }
+                }
+              } else {
+                const x = parseFloat(el.getAttribute('x') || el.getAttribute('cx') || '0');
+                const y = parseFloat(el.getAttribute('y') || el.getAttribute('cy') || '0');
+                const w = parseFloat(el.getAttribute('width') || el.getAttribute('r') || '0');
+                const h = parseFloat(el.getAttribute('height') || el.getAttribute('r') || '0');
+                if (w > 0 && h > 0) {
+                  minX = Math.min(minX, x);
+                  minY = Math.min(minY, y);
+                  maxX = Math.max(maxX, x + w);
+                  maxY = Math.max(maxY, y + h);
+                }
+              }
+            });
+
+            if (minX < maxX && minY < maxY && isFinite(minX) && isFinite(minY)) {
+              const tightW = maxX - minX;
+              const tightH = maxY - minY;
+              const rasterAspect = (naturalDims.width || 500) / (naturalDims.height || 500);
+              const contentAspect = tightW / tightH;
+
+              let finalVbX = minX;
+              let finalVbY = minY;
+              let finalVbW = tightW;
+              let finalVbH = tightH;
+
+              if (rasterAspect > contentAspect) {
+                // Raster is wider than vector content: expand width symmetrically to align 1:1
+                const targetW = tightH * rasterAspect;
+                finalVbX = minX - (targetW - tightW) / 2;
+                finalVbW = targetW;
+              } else if (rasterAspect < contentAspect) {
+                // Raster is taller than vector content: expand height symmetrically to align 1:1
+                const targetH = tightW / rasterAspect;
+                finalVbY = minY - (targetH - tightH) / 2;
+                finalVbH = targetH;
+              }
+
+              svgEl.setAttribute('viewBox', `${finalVbX} ${finalVbY} ${finalVbW} ${finalVbH}`);
+            }
+          }
         }
 
         svgEl.setAttribute('width', '100%');
@@ -177,6 +260,21 @@ export const CompareView: React.FC<CompareViewProps> = ({
   // Synchronized Panning via Middle-Click Drag, Left-Click Drag, or Touch Drag
   useEffect(() => {
     const handleGlobalMouseMove = (e: MouseEvent) => {
+      if (isDraggingLensRef.current && dragLensPaneRef.current) {
+        e.preventDefault();
+        const paneEl = dragLensPaneRef.current === 'left' ? leftPaneRef.current : rightPaneRef.current;
+        if (paneEl) {
+          const rect = paneEl.getBoundingClientRect();
+          const curX = e.clientX - rect.left;
+          const curY = e.clientY - rect.top;
+          setMousePos({
+            x: Math.max(0, Math.min(paneEl.clientWidth, curX - dragLensOffsetRef.current.x)),
+            y: Math.max(0, Math.min(paneEl.clientHeight, curY - dragLensOffsetRef.current.y))
+          });
+        }
+        return;
+      }
+
       if (isDraggingPanRef.current) {
         e.preventDefault();
         const dx = e.clientX - lastPanPosRef.current.x;
@@ -190,6 +288,12 @@ export const CompareView: React.FC<CompareViewProps> = ({
     };
 
     const handleGlobalMouseUp = (e: MouseEvent) => {
+      if (isDraggingLensRef.current) {
+        isDraggingLensRef.current = false;
+        setIsDraggingLens(false);
+        dragLensPaneRef.current = null;
+      }
+
       if (e.button === 1) {
         e.preventDefault();
         if (!hasMiddlePannedRef.current) {
@@ -268,28 +372,36 @@ export const CompareView: React.FC<CompareViewProps> = ({
     };
   };
 
-  // Track cursor position inside either pane to place magnifying loupes
+  // Dimensions of magnifying loupe
+  const LENS_RADIUS = 90; // 180px diameter
+  const LENS_DIAMETER = LENS_RADIUS * 2;
+
+  // Track cursor position inside either pane to update hover state over the magnifying loupe
   const handlePaneMouseMove = (e: React.MouseEvent<HTMLDivElement>, pane: 'left' | 'right') => {
     const paneEl = pane === 'left' ? leftPaneRef.current : rightPaneRef.current;
     if (!paneEl) return;
     const rect = paneEl.getBoundingClientRect();
     const x = e.clientX - rect.left;
     const y = e.clientY - rect.top;
-    setMousePos({ x, y });
+
+    if (isMagnifierVisible && mousePos) {
+      const dist = Math.hypot(x - mousePos.x, y - mousePos.y);
+      setIsHoveringLens(dist <= LENS_RADIUS);
+    } else {
+      setIsHoveringLens(false);
+    }
     setActivePane(pane);
   };
 
   const handlePaneMouseLeave = () => {
-    if (!isMagnifierVisible) {
-      setMousePos(null);
-      setActivePane(null);
-    }
+    setIsHoveringLens(false);
   };
 
   // Left-Click & Middle-Click Handler:
   // - Double middle-click: restores original pan (0,0) and zoom (1.0)
-  // - Left-click and Middle-click drag: pans both images simultaneously by default!
-  const handlePaneMouseDown = (e: React.MouseEvent<HTMLDivElement>) => {
+  // - Left-click inside magnifier: drags and moves the magnifier loupe!
+  // - Left-click outside magnifier (or middle-click): pans both images simultaneously!
+  const handlePaneMouseDown = (e: React.MouseEvent<HTMLDivElement>, pane: 'left' | 'right') => {
     // Middle-click (1): check double middle-click to reset view
     if (e.button === 1) {
       e.preventDefault();
@@ -305,7 +417,26 @@ export const CompareView: React.FC<CompareViewProps> = ({
       lastMiddleClickTimeRef.current = now;
     }
 
-    // Left-click (0) or Middle-click (1): pan by default!
+    // Left-click (0): check if clicked inside the magnifier lens!
+    if (e.button === 0 && isMagnifierVisible && mousePos) {
+      const paneEl = pane === 'left' ? leftPaneRef.current : rightPaneRef.current;
+      if (paneEl) {
+        const rect = paneEl.getBoundingClientRect();
+        const x = e.clientX - rect.left;
+        const y = e.clientY - rect.top;
+        const dist = Math.hypot(x - mousePos.x, y - mousePos.y);
+        if (dist <= LENS_RADIUS) {
+          e.preventDefault();
+          isDraggingLensRef.current = true;
+          setIsDraggingLens(true);
+          dragLensPaneRef.current = pane;
+          dragLensOffsetRef.current = { x: x - mousePos.x, y: y - mousePos.y };
+          return;
+        }
+      }
+    }
+
+    // Otherwise: Left-click (0) or Middle-click (1) pans both images!
     if (e.button === 0 || e.button === 1) {
       e.preventDefault();
       isDraggingPanRef.current = true;
@@ -321,8 +452,7 @@ export const CompareView: React.FC<CompareViewProps> = ({
     e.stopPropagation();
     if (isMagnifierVisible) {
       setIsMagnifierVisible(false);
-      setMousePos(null);
-      setActivePane(null);
+      setIsHoveringLens(false);
     } else {
       const coord = getArtworkNormCoord(e.clientX, e.clientY, pane);
       if (!coord) return;
@@ -332,11 +462,15 @@ export const CompareView: React.FC<CompareViewProps> = ({
     }
   };
 
-  // Touch Gesture Handlers (Pinch to zoom & Touch drag to pan on hands-free/touch devices)
+  // Touch Gesture Handlers (Pinch to zoom & Touch drag to pan or move magnifier)
   const handleStageTouchStart = (e: React.TouchEvent<HTMLDivElement>) => {
     if (e.touches.length === 2) {
       e.preventDefault();
       isTouchPinchingRef.current = true;
+      isDraggingPanRef.current = false;
+      isDraggingLensRef.current = false;
+      setIsDraggingLens(false);
+      setIsDraggingPan(false);
       const t1 = e.touches[0];
       const t2 = e.touches[1];
       const dist = Math.hypot(t2.clientX - t1.clientX, t2.clientY - t1.clientY);
@@ -349,8 +483,54 @@ export const CompareView: React.FC<CompareViewProps> = ({
     } else if (e.touches.length === 1) {
       const t = e.touches[0];
       lastTouchPosRef.current = { x: t.clientX, y: t.clientY };
-      isDraggingPanRef.current = true;
-      setIsDraggingPan(true);
+
+      // Check if touch begins inside the magnifier in left or right pane
+      let touchedInsideLens = false;
+      if (isMagnifierVisible && mousePos) {
+        if (leftPaneRef.current) {
+          const rect = leftPaneRef.current.getBoundingClientRect();
+          if (
+            t.clientX >= rect.left &&
+            t.clientX <= rect.right &&
+            t.clientY >= rect.top &&
+            t.clientY <= rect.bottom
+          ) {
+            const x = t.clientX - rect.left;
+            const y = t.clientY - rect.top;
+            if (Math.hypot(x - mousePos.x, y - mousePos.y) <= LENS_RADIUS) {
+              touchedInsideLens = true;
+              isDraggingLensRef.current = true;
+              setIsDraggingLens(true);
+              dragLensPaneRef.current = 'left';
+              dragLensOffsetRef.current = { x: x - mousePos.x, y: y - mousePos.y };
+            }
+          }
+        }
+        if (!touchedInsideLens && rightPaneRef.current) {
+          const rect = rightPaneRef.current.getBoundingClientRect();
+          if (
+            t.clientX >= rect.left &&
+            t.clientX <= rect.right &&
+            t.clientY >= rect.top &&
+            t.clientY <= rect.bottom
+          ) {
+            const x = t.clientX - rect.left;
+            const y = t.clientY - rect.top;
+            if (Math.hypot(x - mousePos.x, y - mousePos.y) <= LENS_RADIUS) {
+              touchedInsideLens = true;
+              isDraggingLensRef.current = true;
+              setIsDraggingLens(true);
+              dragLensPaneRef.current = 'right';
+              dragLensOffsetRef.current = { x: x - mousePos.x, y: y - mousePos.y };
+            }
+          }
+        }
+      }
+
+      if (!touchedInsideLens) {
+        isDraggingPanRef.current = true;
+        setIsDraggingPan(true);
+      }
     }
   };
 
@@ -377,13 +557,28 @@ export const CompareView: React.FC<CompareViewProps> = ({
         if (newZoom < 0.2) newZoom = 0.2;
         setZoom(Math.round(newZoom * 100) / 100);
       }
-    } else if (e.touches.length === 1 && isDraggingPanRef.current) {
-      e.preventDefault();
-      const t = e.touches[0];
-      const dx = t.clientX - lastTouchPosRef.current.x;
-      const dy = t.clientY - lastTouchPosRef.current.y;
-      lastTouchPosRef.current = { x: t.clientX, y: t.clientY };
-      setPan((prev) => ({ x: prev.x + dx, y: prev.y + dy }));
+    } else if (e.touches.length === 1) {
+      if (isDraggingLensRef.current && dragLensPaneRef.current) {
+        e.preventDefault();
+        const t = e.touches[0];
+        const paneEl = dragLensPaneRef.current === 'left' ? leftPaneRef.current : rightPaneRef.current;
+        if (paneEl) {
+          const rect = paneEl.getBoundingClientRect();
+          const curX = t.clientX - rect.left;
+          const curY = t.clientY - rect.top;
+          setMousePos({
+            x: Math.max(0, Math.min(paneEl.clientWidth, curX - dragLensOffsetRef.current.x)),
+            y: Math.max(0, Math.min(paneEl.clientHeight, curY - dragLensOffsetRef.current.y))
+          });
+        }
+      } else if (isDraggingPanRef.current) {
+        e.preventDefault();
+        const t = e.touches[0];
+        const dx = t.clientX - lastTouchPosRef.current.x;
+        const dy = t.clientY - lastTouchPosRef.current.y;
+        lastTouchPosRef.current = { x: t.clientX, y: t.clientY };
+        setPan((prev) => ({ x: prev.x + dx, y: prev.y + dy }));
+      }
     }
   };
 
@@ -395,12 +590,11 @@ export const CompareView: React.FC<CompareViewProps> = ({
     if (e.touches.length === 0) {
       isDraggingPanRef.current = false;
       setIsDraggingPan(false);
+      isDraggingLensRef.current = false;
+      setIsDraggingLens(false);
+      dragLensPaneRef.current = null;
     }
   };
-
-  // Dimensions of magnifying loupe
-  const LENS_RADIUS = 90; // 180px diameter
-  const LENS_DIAMETER = LENS_RADIUS * 2;
 
   // Calculate synchronized magnifying glass parameters
   const getLensStyle = (pane: 'left' | 'right') => {
@@ -459,8 +653,10 @@ export const CompareView: React.FC<CompareViewProps> = ({
           ? 'bg-white'
           : 'bg-slate-950'
       } ${
-        isDraggingPan
+        isDraggingLens || isDraggingPan
           ? 'cursor-grabbing'
+          : isHoveringLens
+          ? 'cursor-move'
           : 'cursor-grab'
       }`}
     >
@@ -523,11 +719,15 @@ export const CompareView: React.FC<CompareViewProps> = ({
         <div
           ref={leftPaneRef}
           onMouseMove={(e) => handlePaneMouseMove(e, 'left')}
-          onMouseDown={handlePaneMouseDown}
+          onMouseDown={(e) => handlePaneMouseDown(e, 'left')}
           onDoubleClick={(e) => handlePaneDoubleClick(e, 'left')}
           onMouseLeave={handlePaneMouseLeave}
           className={`flex-1 h-full relative overflow-hidden flex items-center justify-center ${
-            isDraggingPan ? 'cursor-grabbing' : 'cursor-grab'
+            isDraggingLens || isDraggingPan
+              ? 'cursor-grabbing'
+              : isHoveringLens
+              ? 'cursor-move'
+              : 'cursor-grab'
           }`}
         >
           {/* Header Tag */}
@@ -638,11 +838,15 @@ export const CompareView: React.FC<CompareViewProps> = ({
         <div
           ref={rightPaneRef}
           onMouseMove={(e) => handlePaneMouseMove(e, 'right')}
-          onMouseDown={handlePaneMouseDown}
+          onMouseDown={(e) => handlePaneMouseDown(e, 'right')}
           onDoubleClick={(e) => handlePaneDoubleClick(e, 'right')}
           onMouseLeave={handlePaneMouseLeave}
           className={`flex-1 h-full relative overflow-hidden flex items-center justify-center ${
-            isDraggingPan ? 'cursor-grabbing' : 'cursor-grab'
+            isDraggingLens || isDraggingPan
+              ? 'cursor-grabbing'
+              : isHoveringLens
+              ? 'cursor-move'
+              : 'cursor-grab'
           }`}
         >
           {/* Header Tag */}
@@ -849,7 +1053,21 @@ export const CompareView: React.FC<CompareViewProps> = ({
         {/* Toggle Magnifier Icon */}
         <button
           type="button"
-          onClick={() => setIsMagnifierVisible(!isMagnifierVisible)}
+          onClick={() => {
+            if (isMagnifierVisible) {
+              setIsMagnifierVisible(false);
+              setIsHoveringLens(false);
+            } else {
+              setIsMagnifierVisible(true);
+              if (!mousePos) {
+                const paneEl = leftPaneRef.current || rightPaneRef.current;
+                const w = paneEl ? paneEl.clientWidth : 500;
+                const h = paneEl ? paneEl.clientHeight : 500;
+                setMousePos({ x: Math.round(w / 2), y: Math.round(h / 2) });
+                setActivePane('left');
+              }
+            }
+          }}
           className={`p-1.5 rounded-xl transition-all cursor-pointer ${
             isMagnifierVisible
               ? 'bg-purple-600 text-white shadow-xs'

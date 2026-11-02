@@ -7,7 +7,8 @@ import {
   Ruler,
   Maximize2,
   Trash2,
-  Eye
+  Eye,
+  Sparkles
 } from 'lucide-react';
 import type { CanvasMode, ContextMenuState, SelectionBounds } from '../../hooks/useFabricCanvas';
 import { GenerationProgressOverlay } from './GenerationProgressOverlay';
@@ -410,7 +411,7 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
         {onDeleteSelected && (
           <button
             type="button"
-            onClick={onDeleteSelected}
+            onClick={() => onDeleteSelected()}
             disabled={!hasSelection}
             className={`p-1.5 rounded-xl transition-colors ${
               hasSelection
@@ -446,6 +447,17 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
         onAuxClick={(e) => {
           if (e.button === 1) e.preventDefault();
         }}
+        onPointerDown={(e) => {
+          if (brushMode !== 'none') {
+            const rect = containerRef.current?.getBoundingClientRect();
+            if (rect) {
+              setBrushPointerPos({
+                x: e.clientX - rect.left,
+                y: e.clientY - rect.top
+              });
+            }
+          }
+        }}
         onPointerMove={(e) => {
           if (brushMode === 'none') {
             if (brushPointerPos !== null) setBrushPointerPos(null);
@@ -460,16 +472,43 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
           }
         }}
         onPointerLeave={() => setBrushPointerPos(null)}
-        className={`flex-1 w-full h-full relative flex items-center justify-center overflow-hidden transition-colors duration-200 ${
+        className={`flex-1 w-full h-full relative flex items-center justify-center overflow-hidden transition-colors duration-200 select-none ${
           matBackground === 'transparent'
             ? 'cricut-grid-bg'
             : matBackground === 'white'
             ? 'bg-white'
             : 'bg-slate-950'
         } ${isLassoActive || brushMode === 'paint' || brushMode === 'erase' ? 'cursor-crosshair' : brushMode === 'fill' ? 'cursor-cell' : 'cursor-default'}`}
-        style={showRulers ? { paddingLeft: 22, paddingTop: 22 } : undefined}
+        style={{
+          touchAction: 'none',
+          ...(showRulers ? { paddingLeft: 22, paddingTop: 22 } : {})
+        }}
       >
         <canvas ref={canvasRef} className={mode === 'compare' ? 'hidden' : 'max-w-full max-h-full'} />
+
+        {/* If in Vector Studio but artwork is not yet vectorized */}
+        {mode === 'vector' && !hasVector && hasImage && (
+          <div className="absolute inset-0 z-20 flex flex-col items-center justify-center bg-slate-900/40 backdrop-blur-xs p-6 text-center select-none">
+            <div className="max-w-sm bg-white p-6 rounded-2xl shadow-2xl border border-slate-200 flex flex-col items-center animate-in fade-in zoom-in-95">
+              <div className="w-12 h-12 rounded-2xl bg-indigo-50 text-indigo-600 flex items-center justify-center mb-3">
+                <Sparkles className="w-6 h-6" />
+              </div>
+              <h3 className="font-extrabold text-sm text-slate-800">Convert Image to Vector Paths</h3>
+              <p className="text-xs text-slate-500 mt-1 mb-4 leading-relaxed">
+                Your imported image is loaded! Convert it into clean Cricut cutting mats and vector layers.
+              </p>
+              <button
+                type="button"
+                onClick={onTriggerVectorize}
+                disabled={isVectorizing}
+                className="w-full py-2.5 px-4 bg-indigo-600 hover:bg-indigo-700 text-white rounded-xl text-xs font-bold shadow-md shadow-indigo-100 flex items-center justify-center gap-2 cursor-pointer transition-all active:scale-95 disabled:opacity-50"
+              >
+                <Sparkles className="w-4 h-4" />
+                <span>{isVectorizing ? 'Vectorizing with VTracer...' : 'Convert to SVG Vectors'}</span>
+              </button>
+            </div>
+          </div>
+        )}
 
         {/* Side-by-Side Comparison Workspace */}
         {mode === 'compare' && (

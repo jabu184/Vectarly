@@ -75,6 +75,37 @@ export interface CanvasColorLayer {
   visible: boolean;
 }
 
+export interface VectarlyProjectFile {
+  format: 'vectarly-project';
+  version: '1.1';
+  createdAt: string;
+  metadata?: {
+    title?: string;
+    pathCount?: number;
+    colorCount?: number;
+    appName?: string;
+  };
+  canvas: {
+    mode: CanvasMode;
+    fabricJSON: any;
+    masterArtworkFrame?: { left: number; top: number; width: number; height: number } | null;
+  };
+  palette?: {
+    colorLayers?: { color: string; count: number; visible?: boolean }[];
+    layerOrder?: string[];
+  };
+  sourceData?: {
+    originalRasterUrl?: string | null;
+    originalSvgString?: string | null;
+    currentSvgString?: string | null;
+  };
+  settings?: {
+    units?: MeasurementUnit;
+    matBackground?: 'transparent' | 'white' | 'black';
+    vinylSettings?: VinylCutSettings;
+  };
+}
+
 function pointInPolygon(p: { x: number; y: number }, points: { x: number; y: number }[]): boolean {
   if (points.length < 3) return false;
   let inside = false;
@@ -596,6 +627,8 @@ export function useFabricCanvas() {
 
   // Cache current SVG
   const currentSvgRef = useRef<string | null>(null);
+  // Cache latest vector canvas snapshot (JSON) to preserve all user edits across tab switches
+  const lastVectorSnapshotRef = useRef<string | null>(null);
 
   // Initialize Fabric Canvas
   useEffect(() => {
@@ -1105,8 +1138,11 @@ export function useFabricCanvas() {
         const t = e.touches[0];
         lastTouchMidpoint = { x: t.clientX, y: t.clientY };
 
-        // If brush mode is active, let brush engine handle drawing
-        if (brushModeRef.current !== 'none') return;
+        // If brush mode is active, let brush engine handle drawing with finger
+        if (brushModeRef.current !== 'none') {
+          e.preventDefault();
+          return;
+        }
 
         // Check if user touched an object or empty canvas / mat
         const target = canvas.findTarget(e);
@@ -1147,15 +1183,21 @@ export function useFabricCanvas() {
 
         canvas.requestRenderAll();
         updateViewportTransformRef.current();
-      } else if (e.touches.length === 1 && isTouchPanning) {
-        e.preventDefault();
-        const t = e.touches[0];
-        const dx = t.clientX - lastTouchMidpoint.x;
-        const dy = t.clientY - lastTouchMidpoint.y;
-        lastTouchMidpoint = { x: t.clientX, y: t.clientY };
-        canvas.relativePan(new Point(dx, dy));
-        canvas.requestRenderAll();
-        updateViewportTransformRef.current();
+      } else if (e.touches.length === 1) {
+        if (brushModeRef.current !== 'none') {
+          e.preventDefault();
+          return;
+        }
+        if (isTouchPanning) {
+          e.preventDefault();
+          const t = e.touches[0];
+          const dx = t.clientX - lastTouchMidpoint.x;
+          const dy = t.clientY - lastTouchMidpoint.y;
+          lastTouchMidpoint = { x: t.clientX, y: t.clientY };
+          canvas.relativePan(new Point(dx, dy));
+          canvas.requestRenderAll();
+          updateViewportTransformRef.current();
+        }
       }
     };
 
@@ -1695,7 +1737,7 @@ export function useFabricCanvas() {
     canvas.renderAll();
 
     setHasImage(true);
-    setHasVector(false);
+    setHasVector(!!(currentSvgRef.current || originalVectorRef.current));
     setMode('raster');
   }, [centerObject, applyDashedBoundingStyles]);
 
@@ -2057,13 +2099,14 @@ export function useFabricCanvas() {
       setActiveDetailPercent(100);
 
       canvas.renderAll();
+      refreshColorLayers();
       setHasVector(true);
       setHasImage(true);
       setMode('vector');
     } catch (err) {
       console.error('Error restoring vector snapshot:', err);
     }
-  }, []);
+  }, [refreshColorLayers]);
 
   /**
    * Load raster image onto canvas (Records history)
@@ -2104,6 +2147,7 @@ export function useFabricCanvas() {
    * @param isSourceOrConversion True if this is original AI SVG or initial vector conversion from raster
    */
   const loadVectorSvg = useCallback(async (svgString: string, isSourceOrConversion = false) => {
+    lastVectorSnapshotRef.current = null;
     pushUndoSnapshot();
     if (isSourceOrConversion || !originalVectorRef.current) {
       originalVectorRef.current = svgString;
@@ -2123,6 +2167,7 @@ export function useFabricCanvas() {
     setBrushMode('none');
 
     if (mode === 'vector') {
+      lastVectorSnapshotRef.current = null;
       // In Vector Studio: go back to the original converted vector (or direct AI vector)
       if (originalVectorRef.current) {
         await renderVectorInternal(originalVectorRef.current);
@@ -2158,21 +2203,123 @@ export function useFabricCanvas() {
   }, [mode, pushUndoSnapshot, renderVectorInternal, renderRasterInternal, isWeedCheckActive, runWeedCheck]);
 
   /**
+   * Captures the current live vector canvas state (JSON and SVG) so user modifications
+   * (moves, deletes, color swaps, layer order, smoothing) persist across tab navigations.
+   */
+  const saveCurrentVectorSnapshot = useCallback(() => {
+    const canvas = fabricCanvasRef.current;
+    if (!canvas) return;
+
+    const objects = canvas
+      .getObjects()
+      .filter(
+        (o) =>
+          (o as any).name !== 'crop-overlay' &&
+          (o as any).name !== 'lasso-preview' &&
+          (o as any).name !== 'raster-target'
+      );
+
+    if (objects.length > 0) {
+      try {
+        const json = JSON.stringify(
+          (canvas as any).toJSON([
+            'id',
+            'name',
+            'selectable',
+            'hasControls',
+            'lockMovementX',
+            'lockMovementY',
+            'lockRotation',
+            'lockScalingX',
+            'lockScalingY',
+            '_originalFill',
+            '_originalStroke',
+            '_originalStrokeWidth',
+            '_baseSvgD',
+            'strokeUniform',
+            'strokeLineCap',
+            'strokeLineJoin'
+          ])
+        );
+        lastVectorSnapshotRef.current = json;
+
+        // Also update currentSvgRef so Compare View and SVG export reflect the modified vectors
+        const frame = masterArtworkFrameRef.current;
+        if (frame && frame.width > 0 && frame.height > 0 && typeof (canvas as any).toSVG === 'function') {
+          currentSvgRef.current = (canvas as any).toSVG({
+            viewBox: {
+              x: frame.left,
+              y: frame.top,
+              width: frame.width,
+              height: frame.height
+            },
+            width: frame.width,
+            height: frame.height
+          });
+        } else if (typeof (canvas as any).toSVG === 'function') {
+          currentSvgRef.current = (canvas as any).toSVG();
+        }
+      } catch (err) {
+        console.warn('Could not snapshot vector canvas:', err);
+      }
+    }
+  }, []);
+
+  /**
    * Switch between workspace modes cleanly using preserved original states
    */
   const switchToRasterMode = useCallback(async () => {
     if (originalRasterRef.current) {
+      saveCurrentVectorSnapshot();
       pushUndoSnapshot();
       await renderRasterInternal(originalRasterRef.current);
+      setHasVector(!!(lastVectorSnapshotRef.current || currentSvgRef.current || originalVectorRef.current));
+      setMode('raster');
     }
-  }, [pushUndoSnapshot, renderRasterInternal]);
+  }, [saveCurrentVectorSnapshot, pushUndoSnapshot, renderRasterInternal]);
 
   const switchToVectorMode = useCallback(async () => {
-    if (originalVectorRef.current) {
-      pushUndoSnapshot();
-      await renderVectorInternal(originalVectorRef.current);
+    const canvas = fabricCanvasRef.current;
+    if (canvas) {
+      const objects = canvas.getObjects();
+      const hasRaster = objects.some((o) => (o as any).name === 'raster-target');
+      const vectorObjs = objects.filter(
+        (o) =>
+          (o as any).name !== 'raster-target' &&
+          (o as any).name !== 'crop-overlay' &&
+          (o as any).name !== 'lasso-preview'
+      );
+
+      // If the canvas is ALREADY holding the active vector objects and not the raster target,
+      // simply activate vector mode without clearing the canvas or reloading!
+      if (vectorObjs.length > 0 && !hasRaster) {
+        setHasImage(!!originalRasterRef.current);
+        setHasVector(true);
+        setMode('vector');
+        return;
+      }
     }
-  }, [pushUndoSnapshot, renderVectorInternal]);
+
+    // If we have a saved snapshot of the user's vector modifications, restore that snapshot!
+    if (lastVectorSnapshotRef.current) {
+      pushUndoSnapshot();
+      await restoreVectorSnapshot(lastVectorSnapshotRef.current);
+      refreshColorLayers();
+      setHasImage(!!originalRasterRef.current);
+      setHasVector(true);
+      setMode('vector');
+      return;
+    }
+
+    const svgToLoad = currentSvgRef.current || originalVectorRef.current;
+    if (svgToLoad) {
+      pushUndoSnapshot();
+      await renderVectorInternal(svgToLoad);
+      setHasImage(!!originalRasterRef.current);
+      setHasVector(true);
+      setMode('vector');
+    }
+  }, [pushUndoSnapshot, restoreVectorSnapshot, refreshColorLayers, renderVectorInternal]);
 
   /**
    * Retrieves current raster artwork and SVG vector string for Side-by-Side Compare Mode
@@ -3040,6 +3187,403 @@ export function useFabricCanvas() {
   );
 
   /**
+   * Serializes current project into standard .vectarly project format
+   */
+  const exportProjectJSON = useCallback(
+    (title?: string): string => {
+      const canvas = fabricCanvasRef.current;
+      if (!canvas) return '';
+
+      // Discard any active multi-selection so individual objects are serialized in absolute canvas coordinates
+      const hadSelection = !!canvas.getActiveObject();
+      if (hadSelection) {
+        canvas.discardActiveObject();
+        canvas.renderAll();
+      }
+
+      const objects = canvas
+        .getObjects()
+        .filter((o) => (o as any).name !== 'crop-overlay' && (o as any).name !== 'lasso-preview');
+
+      const customProps = [
+        '_originalFill',
+        '_originalStroke',
+        '_originalStrokeWidth',
+        '_baseSvgD',
+        'name',
+        'id',
+        'layerId',
+        'selectable',
+        'hasControls',
+        'hoverCursor',
+        'perPixelTargetFind',
+        'visible',
+        'opacity',
+        'fill',
+        'stroke',
+        'strokeWidth',
+        'strokeDashArray',
+        'strokeLineCap',
+        'strokeLineJoin'
+      ];
+      const fabricJSON = canvas.toObject(customProps);
+
+      // Export live SVG representation of all current vector objects as a robust fallback
+      let currentSvgString = currentSvgRef.current || null;
+      if (mode === 'vector' && objects.length > 0) {
+        try {
+          const frame = masterArtworkFrameRef.current;
+          if (frame && frame.width > 0 && frame.height > 0 && typeof (canvas as any).toSVG === 'function') {
+            currentSvgString = (canvas as any).toSVG({
+              viewBox: {
+                x: frame.left,
+                y: frame.top,
+                width: frame.width,
+                height: frame.height
+              },
+              width: frame.width,
+              height: frame.height
+            });
+          } else {
+            currentSvgString = canvas.toSVG();
+          }
+        } catch (e) {
+          console.warn('[Export] Could not serialize SVG:', e);
+        }
+      }
+
+      const activeLayers = colorLayersRef.current;
+      const project: VectarlyProjectFile = {
+        format: 'vectarly-project',
+        version: '1.1',
+        createdAt: new Date().toISOString(),
+        metadata: {
+          title: title || 'Vectarly Project',
+          pathCount: objects.length,
+          colorCount: activeLayers.length,
+          appName: 'Vectarly'
+        },
+        canvas: {
+          mode,
+          fabricJSON,
+          masterArtworkFrame: masterArtworkFrameRef.current ? { ...masterArtworkFrameRef.current } : null
+        },
+        palette: {
+          colorLayers: activeLayers.map((l) => ({
+            color: l.color,
+            count: l.count,
+            visible: l.visible
+          })),
+          layerOrder: activeLayers.map((l) => l.color)
+        },
+        sourceData: {
+          originalRasterUrl: originalRasterRef.current || null,
+          originalSvgString: originalVectorRef.current || null,
+          currentSvgString
+        },
+        settings: {
+          units,
+          matBackground,
+          vinylSettings
+        }
+      };
+
+      // Restore selection if there was one
+      if (hadSelection && mode === 'vector' && objects.length > 0) {
+        selectAllVectors();
+      }
+
+      return JSON.stringify(project, null, 2);
+    },
+    [mode, units, matBackground, vinylSettings, selectAllVectors]
+  );
+
+  /**
+   * Loads a .vectarly project file or JSON snapshot into canvas
+   */
+  const loadProjectJSON = useCallback(
+    async (
+      jsonString: string,
+      activeTab?: CanvasMode
+    ): Promise<{ success: boolean; title?: string; mode?: CanvasMode; error?: string }> => {
+      const canvas = fabricCanvasRef.current;
+      if (!canvas) return { success: false, error: 'Canvas not initialized' };
+
+      try {
+        const data = typeof jsonString === 'string' ? JSON.parse(jsonString) : jsonString;
+
+        // Reset viewport pan and zoom to default prior to loading
+        canvas.setViewportTransform([1, 0, 0, 1, 0, 0]);
+        setZoomLevel(1);
+
+        // Handle Vectarly Project File format
+        if (data && (data.format === 'vectarly-project' || data.canvas || data.sourceData)) {
+          pushUndoSnapshot();
+
+          canvas.clear();
+          cropOverlayObjRef.current = null;
+          setActiveCropType('none');
+          setIsLineArt(false);
+          lastVectorSnapshotRef.current = null;
+
+          // 1. Restore frames and source data
+          if (data.canvas?.masterArtworkFrame) {
+            masterArtworkFrameRef.current = { ...data.canvas.masterArtworkFrame };
+          } else {
+            masterArtworkFrameRef.current = null;
+          }
+
+          const rasterUrl = data.sourceData?.originalRasterUrl || data.image || data.dataUrl || null;
+          const svgContent = data.sourceData?.currentSvgString || data.sourceData?.originalSvgString || data.svg || null;
+
+          if (rasterUrl) {
+            originalRasterRef.current = rasterUrl;
+          }
+          if (svgContent) {
+            originalVectorRef.current = svgContent;
+            currentSvgRef.current = svgContent;
+          }
+
+          // 2. Restore settings
+          if (data.settings) {
+            if (data.settings.units) setUnits(data.settings.units);
+            if (data.settings.matBackground) setMatBackground(data.settings.matBackground);
+            if (data.settings.vinylSettings) setVinylSettingsState(data.settings.vinylSettings);
+          }
+
+          const hasVectorData = !!(svgContent && typeof svgContent === 'string' && svgContent.includes('<'));
+          const hasRasterData = !!rasterUrl;
+          const hasFabricJSON = data.canvas?.fabricJSON && Array.isArray(data.canvas.fabricJSON.objects) && data.canvas.fabricJSON.objects.length > 0;
+          if (hasFabricJSON) {
+            lastVectorSnapshotRef.current = JSON.stringify(data.canvas.fabricJSON);
+          }
+
+          // Determine the tab to display: keep whatever tab was on display when the file was loaded!
+          const currentTab = activeTab || mode;
+          let targetDisplayMode: CanvasMode = currentTab;
+
+          // If the current tab has no corresponding artwork in the project file, fallback to the available data
+          if (targetDisplayMode === 'vector' && !hasVectorData && !hasFabricJSON && hasRasterData) {
+            targetDisplayMode = 'raster';
+          } else if (targetDisplayMode === 'raster' && !hasRasterData && (hasVectorData || hasFabricJSON)) {
+            targetDisplayMode = 'vector';
+          }
+
+          // Render on canvas matching whatever tab is on display right now
+          if (targetDisplayMode === 'vector' && (hasFabricJSON || (hasVectorData && svgContent))) {
+            if (hasFabricJSON) {
+              await restoreVectorSnapshot(JSON.stringify(data.canvas.fabricJSON));
+              if (data.canvas?.masterArtworkFrame) {
+                masterArtworkFrameRef.current = { ...data.canvas.masterArtworkFrame };
+              }
+              const frame = masterArtworkFrameRef.current;
+              if (frame && frame.width > 0 && frame.height > 0 && typeof (canvas as any).toSVG === 'function') {
+                currentSvgRef.current = (canvas as any).toSVG({
+                  viewBox: {
+                    x: frame.left,
+                    y: frame.top,
+                    width: frame.width,
+                    height: frame.height
+                  },
+                  width: frame.width,
+                  height: frame.height
+                });
+              }
+            } else if (svgContent) {
+              await renderVectorInternal(svgContent);
+            }
+
+            // Reorder layers if layerOrder was saved
+            if (data.palette?.layerOrder && Array.isArray(data.palette.layerOrder) && data.palette.layerOrder.length > 0) {
+              reorderColorLayers(data.palette.layerOrder);
+            }
+
+            // Restore hidden layer states if any
+            if (data.palette?.colorLayers && Array.isArray(data.palette.colorLayers)) {
+              data.palette.colorLayers.forEach((layerItem: any) => {
+                if (layerItem.visible === false && layerItem.color) {
+                  const hex = layerItem.color.toUpperCase();
+                  canvas.getObjects().forEach((o) => {
+                    const fill = ((o.fill as string) || '').trim().toUpperCase();
+                    if (fill === hex) {
+                      o.set('visible', false);
+                    }
+                  });
+                }
+              });
+            }
+
+            canvas.setViewportTransform([1, 0, 0, 1, 0, 0]);
+            setZoomLevel(1);
+            canvas.renderAll();
+            refreshColorLayers();
+            selectAllVectors();
+          } else if (hasRasterData && rasterUrl) {
+            // Render raster image onto canvas
+            await renderRasterInternal(rasterUrl);
+            if (data.canvas?.masterArtworkFrame) {
+              masterArtworkFrameRef.current = { ...data.canvas.masterArtworkFrame };
+            }
+            canvas.setViewportTransform([1, 0, 0, 1, 0, 0]);
+            setZoomLevel(1);
+            canvas.renderAll();
+          } else if (hasFabricJSON || (hasVectorData && svgContent)) {
+            if (hasFabricJSON) {
+              await restoreVectorSnapshot(JSON.stringify(data.canvas.fabricJSON));
+              if (data.canvas?.masterArtworkFrame) {
+                masterArtworkFrameRef.current = { ...data.canvas.masterArtworkFrame };
+              }
+            } else if (svgContent) {
+              await renderVectorInternal(svgContent);
+            }
+            canvas.setViewportTransform([1, 0, 0, 1, 0, 0]);
+            setZoomLevel(1);
+            canvas.renderAll();
+            refreshColorLayers();
+            selectAllVectors();
+          }
+
+          // Both vector and raster states are preserved so either tab can be viewed anytime
+          setHasVector(hasVectorData);
+          setHasImage(hasRasterData || hasVectorData);
+          setMode(targetDisplayMode);
+
+          return {
+            success: true,
+            title: data.metadata?.title || 'Vectarly Project',
+            mode: targetDisplayMode
+          };
+        }
+
+        // Handle standard raw Fabric JSON or raw SVG snapshot
+        if (data && (Array.isArray(data.objects) || data.version)) {
+          pushUndoSnapshot();
+          const cleanObjects: any[] = [];
+          for (const obj of (data.objects || [])) {
+            if (
+              (obj.type === 'ActiveSelection' || obj.type === 'activeSelection' || obj.type === 'group' || obj.type === 'Group') &&
+              Array.isArray(obj.objects)
+            ) {
+              const groupLeft = obj.left || 0;
+              const groupTop = obj.top || 0;
+              for (const child of obj.objects) {
+                cleanObjects.push({
+                  ...child,
+                  left: (child.left || 0) + groupLeft,
+                  top: (child.top || 0) + groupTop
+                });
+              }
+            } else {
+              cleanObjects.push(obj);
+            }
+          }
+
+          await canvas.loadFromJSON({ ...data, objects: cleanObjects });
+
+          const objects = canvas
+            .getObjects()
+            .filter((o) => (o as any).name !== 'crop-overlay' && (o as any).name !== 'lasso-preview');
+
+          // Center and frame objects
+          if (objects.length > 0) {
+            let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+            objects.forEach((obj) => {
+              obj.set({
+                selectable: true,
+                hasControls: true,
+                hoverCursor: 'pointer',
+                perPixelTargetFind: true,
+                objectCaching: false
+              });
+              obj.setCoords();
+              const b = obj.getBoundingRect();
+              minX = Math.min(minX, b.left);
+              minY = Math.min(minY, b.top);
+              maxX = Math.max(maxX, b.left + b.width);
+              maxY = Math.max(maxY, b.top + b.height);
+            });
+
+            const artW = maxX - minX;
+            const artH = maxY - minY;
+            if (artW > 0 && artH > 0) {
+              const maxDim = Math.min(canvas.width * 0.8, canvas.height * 0.8);
+              const scale = Math.min(maxDim / artW, maxDim / artH, 1);
+              const targetLeft = (canvas.width - artW * scale) / 2;
+              const targetTop = (canvas.height - artH * scale) / 2;
+              const offX = targetLeft - minX * scale;
+              const offY = targetTop - minY * scale;
+
+              objects.forEach((obj) => {
+                obj.set({
+                  left: (obj.left || 0) * scale + offX,
+                  top: (obj.top || 0) * scale + offY,
+                  scaleX: (obj.scaleX || 1) * scale,
+                  scaleY: (obj.scaleY || 1) * scale
+                });
+                obj.setCoords();
+              });
+            }
+          }
+
+          const masterList: MasterVectorPath[] = [];
+          const colorSet = new Set<string>();
+
+          objects.forEach((obj) => {
+            const fillStr = (typeof obj.fill === 'string' && obj.fill !== 'none' ? obj.fill : '#000000').trim().toUpperCase();
+            if (fillStr.startsWith('#') || fillStr.startsWith('RGB')) {
+              colorSet.add(fillStr);
+            }
+            const bounds = obj.getBoundingRect();
+            masterList.push({
+              obj,
+              originalFill: (obj as any)._originalFill || fillStr,
+              originalStroke: (obj as any)._originalStroke || (typeof obj.stroke === 'string' ? obj.stroke : null),
+              originalStrokeWidth: (obj as any)._originalStrokeWidth || obj.strokeWidth || 0,
+              area: bounds.width * bounds.height
+            });
+          });
+
+          masterPathsRef.current = masterList;
+          const initialColors = Array.from(colorSet);
+          uniqueColorsRef.current = initialColors;
+          setMaxColorCount(Math.max(initialColors.length, 1));
+          setActiveColorCount(Math.max(initialColors.length, 1));
+          setActiveDetailPercent(100);
+
+          canvas.setViewportTransform([1, 0, 0, 1, 0, 0]);
+          setZoomLevel(1);
+          canvas.renderAll();
+          refreshColorLayers();
+
+          setHasVector(objects.length > 0);
+          setHasImage(true);
+          setMode('vector');
+
+          if (objects.length > 0) {
+            selectAllVectors();
+          }
+
+          return { success: true, title: 'Fabric Vector Project', mode: 'vector' };
+        }
+
+        return { success: false, error: 'Unrecognized project file format' };
+      } catch (err: any) {
+        console.error('Error loading project JSON:', err);
+        return { success: false, error: err?.message || 'Failed to parse project file' };
+      }
+    },
+    [
+      pushUndoSnapshot,
+      renderRasterInternal,
+      renderVectorInternal,
+      reorderColorLayers,
+      refreshColorLayers,
+      selectAllVectors,
+      mode
+    ]
+  );
+
+  /**
    * Flatten artwork:
    * 1. Groups all vector paths by their color.
    * 2. Combines all vectors of the same color into a single united path.
@@ -3286,27 +3830,35 @@ export function useFabricCanvas() {
   );
 
   const deleteSelectedObject = useCallback(
-    (target?: FabricObject) => {
+    (target?: FabricObject | unknown) => {
       const canvas = fabricCanvasRef.current;
       if (!canvas) return;
 
-      const active = target || canvas.getActiveObject() || selectedObject;
+      // Ensure target is a genuine FabricObject and not a React event object
+      const validTarget =
+        target && typeof target === 'object' && !('nativeEvent' in target) && !('preventDefault' in target) && typeof (target as any).getBoundingRect === 'function'
+          ? (target as FabricObject)
+          : undefined;
+
+      const active = validTarget || canvas.getActiveObject() || selectedObject;
       if (!active) return;
 
       pushUndoSnapshot();
 
-      const activeObjs = canvas.getActiveObjects();
       let objs: FabricObject[] = [];
-      if (target && !activeObjs.includes(target)) {
-        objs = [target];
-      } else if (activeObjs.length > 0) {
-        objs = activeObjs.slice();
+      if (validTarget) {
+        objs = [validTarget];
       } else {
-        const isMulti =
-          active instanceof ActiveSelection ||
-          (active as any).type?.toLowerCase() === 'activeselection' ||
-          typeof (active as any).getObjects === 'function';
-        objs = isMulti ? (active as any).getObjects().slice() : [active];
+        const activeObjs = canvas.getActiveObjects();
+        if (activeObjs && activeObjs.length > 0) {
+          objs = activeObjs.slice();
+        } else {
+          const isMulti =
+            active instanceof ActiveSelection ||
+            (active as any).type?.toLowerCase() === 'activeselection' ||
+            typeof (active as any).getObjects === 'function';
+          objs = isMulti ? (active as any).getObjects().slice() : [active];
+        }
       }
 
       // Filter out crop overlay or preview objects
@@ -3316,7 +3868,7 @@ export function useFabricCanvas() {
       // Discard active object first so ActiveSelection unbinds objects from the group
       canvas.discardActiveObject();
 
-      objs.forEach((obj) => canvas.remove(obj));
+      canvas.remove(...objs);
       const objsSet = new Set(objs);
       masterPathsRef.current = masterPathsRef.current.filter((item) => !objsSet.has(item.obj));
 
@@ -4161,21 +4713,25 @@ export function useFabricCanvas() {
     };
 
     const handleMouseDown = (opt: any) => {
-      const me = opt.e as MouseEvent;
+      const me = opt.e as MouseEvent | TouchEvent;
 
       // Right mouse button held: Enter Brush Size Adjustment Drag mode
-      if (me.button === 2) {
+      if ('button' in me && me.button === 2) {
         me.preventDefault();
         me.stopPropagation();
         isRightMouseResizingRef.current = true;
-        brushResizeStartXRef.current = me.clientX;
+        brushResizeStartXRef.current = (me as MouseEvent).clientX;
         brushResizeStartSizeRef.current = brushSizeRef.current;
         setIsResizingBrush(true);
-        setBrushResizePos({ x: me.clientX, y: me.clientY });
+        setBrushResizePos({ x: (me as MouseEvent).clientX, y: (me as MouseEvent).clientY });
         return;
       }
 
-      if (me.button !== 0) return; // Left click only for drawing
+      // Check button: allow left click (button === 0) or touch/stylus events (button is undefined or 0)
+      if ('button' in me && (me as MouseEvent).button !== undefined && (me as MouseEvent).button !== 0) return;
+      if (opt.e && typeof opt.e.preventDefault === 'function') {
+        opt.e.preventDefault();
+      }
       canvas.calcOffset();
       const pointer = (opt.scenePoint || canvas.getScenePoint(opt.e) || canvas.getPointer(opt.e));
 
@@ -4481,22 +5037,25 @@ export function useFabricCanvas() {
     };
 
     const handleMouseMove = (opt: any) => {
-      const me = opt.e as MouseEvent;
+      const me = opt.e as MouseEvent | TouchEvent;
 
       if (isMiddlePanningRef.current) return;
       if (brushMode === 'fill') return;
 
       // Dragging horizontally while right mouse is held adjusts brush size
-      if (isRightMouseResizingRef.current) {
+      if (isRightMouseResizingRef.current && 'clientX' in me) {
         me.preventDefault();
-        const deltaX = me.clientX - brushResizeStartXRef.current;
+        const deltaX = (me as MouseEvent).clientX - brushResizeStartXRef.current;
         const newSize = Math.max(4, Math.min(100, Math.round(brushResizeStartSizeRef.current + deltaX * 0.45)));
         setBrushSize(newSize);
-        setBrushResizePos({ x: me.clientX, y: me.clientY });
+        setBrushResizePos({ x: (me as MouseEvent).clientX, y: (me as MouseEvent).clientY });
         return;
       }
 
       if (!isBrushMouseDownRef.current) return;
+      if (opt.e && typeof opt.e.preventDefault === 'function') {
+        opt.e.preventDefault();
+      }
       const pointer = (opt.scenePoint || canvas.getScenePoint(opt.e) || canvas.getPointer(opt.e));
       const pts = brushStrokePointsRef.current;
       if (pts.length === 0) return;
@@ -4970,6 +5529,7 @@ export function useFabricCanvas() {
     resetArtwork,
     switchToRasterMode,
     switchToVectorMode,
+    saveCurrentVectorSnapshot,
     hasOriginalRaster: !!originalRasterRef.current,
     hasOriginalVector: !!originalVectorRef.current,
     compareData,
@@ -5045,6 +5605,9 @@ export function useFabricCanvas() {
     brushResizePos,
     // Vector Outline Smoothing Engine
     outlineSmoothing,
-    setOutlineSmoothing: smoothOutlinesLive
+    setOutlineSmoothing: smoothOutlinesLive,
+    // Project Save & Load Engine
+    exportProjectJSON,
+    loadProjectJSON
   };
 }

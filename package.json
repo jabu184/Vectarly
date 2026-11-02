@@ -1,6 +1,6 @@
 {
   "name": "craftly",
-  "version": "1.1.0",
+  "version": "1.11.0",
   "description": "Craftly - AI Vector & Line-Art Studio for Cricut",
   "scripts": {
     "server": "npm --prefix server run dev",

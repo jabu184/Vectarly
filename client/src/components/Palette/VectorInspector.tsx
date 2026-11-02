@@ -710,7 +710,7 @@ export const VectorInspector: React.FC<VectorInspectorProps> = ({
                 <span>Selected Element</span>
               </span>
               <button
-                onClick={onDeleteSelectedObject}
+                onClick={() => onDeleteSelectedObject && onDeleteSelectedObject()}
                 className="p-1 rounded-lg text-pink-600 hover:bg-pink-100 transition-colors"
                 title="Delete this path"
               >
