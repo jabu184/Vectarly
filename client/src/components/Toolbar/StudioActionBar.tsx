@@ -217,7 +217,7 @@ export const StudioActionBar: React.FC<StudioActionBarProps> = ({
                   onClick={() => onSetBrushMode('paint')}
                   disabled={!hasVector}
                   className="flex items-center gap-1.5 px-2.5 py-1 rounded-lg font-bold text-slate-700 hover:bg-white hover:text-indigo-600 transition-all disabled:opacity-50 cursor-pointer"
-                  title="Paint Brush: Add vector areas to active vinyl mat"
+                  title="Paint Brush: Add vector areas to active vinyl layer"
                 >
                   <Paintbrush className="w-3.5 h-3.5 text-indigo-600" />
                   <span>Paint</span>
@@ -227,7 +227,7 @@ export const StudioActionBar: React.FC<StudioActionBarProps> = ({
                   onClick={() => onSetBrushMode('erase')}
                   disabled={!hasVector}
                   className="flex items-center gap-1.5 px-2.5 py-1 rounded-lg font-bold text-slate-700 hover:bg-white hover:text-rose-600 transition-all disabled:opacity-50 cursor-pointer"
-                  title="Eraser Brush: Erase vector cuts from active vinyl mat"
+                  title="Eraser Brush: Erase vector cuts from active vinyl layer"
                 >
                   <Eraser className="w-3.5 h-3.5 text-rose-500" />
                   <span>Erase</span>

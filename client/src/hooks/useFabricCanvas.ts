@@ -40,7 +40,8 @@ import {
   flattenColorLayersNonOverlapping,
   type FlattenMode,
   pathsToMultiPolygon,
-  multiPolygonToSvgD
+  multiPolygonToSvgD,
+  computeOuterPerimeterD
 } from '../services/booleanUnion';
 import {
   strokeToMultiPolygon,
@@ -103,6 +104,7 @@ export interface VectarlyProjectFile {
     units?: MeasurementUnit;
     matBackground?: 'transparent' | 'white' | 'black';
     vinylSettings?: VinylCutSettings;
+    activeFlattenMode?: FlattenMode;
   };
 }
 
@@ -377,6 +379,31 @@ export function useFabricCanvas() {
   });
   const [isFlattening, setIsFlattening] = useState<boolean>(false);
   const [activeFlattenMode, setActiveFlattenMode] = useState<FlattenMode>('knockout');
+  const isArtworkFlattenedRef = useRef<boolean>(false);
+  const [isSmoothing, setIsSmoothing] = useState<boolean>(false);
+  const isCancelledSmoothingRef = useRef<boolean>(false);
+  const prevSmoothingRef = useRef<number>(0);
+
+  const cancelSmoothing = useCallback(() => {
+    isCancelledSmoothingRef.current = true;
+    setIsSmoothing(false);
+    setOutlineSmoothing(prevSmoothingRef.current);
+  }, []);
+
+  // Outer Perimeter & Sticker Cut State
+  const [isPerimeterHighlightActive, setIsPerimeterHighlightActive] = useState<boolean>(false);
+  const [perimeterColor, setPerimeterColor] = useState<string>('#06b6d4');
+  const isPerimeterHighlightActiveRef = useRef<boolean>(false);
+  const perimeterColorRef = useRef<string>('#06b6d4');
+  const perimeterObjRef = useRef<FabricObject | null>(null);
+
+  useEffect(() => {
+    isPerimeterHighlightActiveRef.current = isPerimeterHighlightActive;
+  }, [isPerimeterHighlightActive]);
+
+  useEffect(() => {
+    perimeterColorRef.current = perimeterColor;
+  }, [perimeterColor]);
 
   // Undo / Redo Stacks
   const undoStackRef = useRef<HistorySnapshot[]>([]);
@@ -394,6 +421,7 @@ export function useFabricCanvas() {
   // Master Vector Paths for On-The-Fly Simplification
   const masterPathsRef = useRef<MasterVectorPath[]>([]);
   const uniqueColorsRef = useRef<string[]>([]);
+  const originalColorsRef = useRef<string[]>([]);
   const [maxColorCount, setMaxColorCount] = useState<number>(1);
   const [activeColorCount, setActiveColorCount] = useState<number>(1);
   const [activeDetailPercent, setActiveDetailPercent] = useState<number>(100);
@@ -431,6 +459,9 @@ export function useFabricCanvas() {
   useEffect(() => {
     colorLayersRef.current = colorLayers;
   }, [colorLayers]);
+
+  // Track unsaved modifications (dirty state)
+  const [isDirty, setIsDirty] = useState<boolean>(false);
 
   // Measurement Units (inches vs centimeters)
   const [units, setUnits] = useState<MeasurementUnit>(getStoredUnits());
@@ -620,9 +651,11 @@ export function useFabricCanvas() {
     setColorLayers(result);
 
     const distinctColors = result.map((r) => r.color);
-    uniqueColorsRef.current = distinctColors;
-    setMaxColorCount(Math.max(distinctColors.length, 2));
-    setActiveColorCount(distinctColors.length);
+    if (originalColorsRef.current.length === 0 || originalColorsRef.current.length < distinctColors.length) {
+      originalColorsRef.current = distinctColors;
+    }
+    uniqueColorsRef.current = originalColorsRef.current;
+    setMaxColorCount(Math.max(originalColorsRef.current.length, distinctColors.length, 1));
   }, []);
 
   // Cache current SVG
@@ -1389,12 +1422,20 @@ export function useFabricCanvas() {
   const exportSvg = useCallback((overrideOptions: CricutExportOptions = {}): string => {
     const canvas = fabricCanvasRef.current;
     if (!canvas) return '';
+    const targetFlattenMode = overrideOptions.flattenMode || activeFlattenMode;
+    const isCanvasAlreadyFlattened =
+      isArtworkFlattenedRef.current &&
+      (overrideOptions.flattenMode === undefined || overrideOptions.flattenMode === activeFlattenMode);
+
     return exportCricutSvg(canvas, {
       isLineArt,
       lineArtOptions: {
         penWidth: lineArtPenWidth,
         colorMode: lineArtColorMode
       },
+      flattenMode: targetFlattenMode,
+      isCanvasAlreadyFlattened,
+      orderedColors: colorLayersRef.current.map((l) => l.color),
       vinylRemediation: {
         enabled:
           vinylSettings.autoRemoveSpecks ||
@@ -1405,7 +1446,7 @@ export function useFabricCanvas() {
       },
       ...overrideOptions
     });
-  }, [isLineArt, lineArtPenWidth, lineArtColorMode, vinylSettings]);
+  }, [isLineArt, lineArtPenWidth, lineArtColorMode, vinylSettings, activeFlattenMode]);
 
   const getRasterDataUrl = useCallback((): string => {
     // If the original uncropped raster data URL is preserved, return it directly for 100% loss-free vectorization
@@ -1480,6 +1521,7 @@ export function useFabricCanvas() {
   captureCurrentSnapshotRef.current = captureCurrentSnapshot;
 
   const pushUndoSnapshot = useCallback(() => {
+    setIsDirty(true);
     const snap = captureCurrentSnapshot();
     if (!snap) return;
 
@@ -1857,6 +1899,7 @@ export function useFabricCanvas() {
 
       masterPathsRef.current = masterList;
       const initialColors = Array.from(colorSet);
+      originalColorsRef.current = initialColors;
       uniqueColorsRef.current = initialColors;
       setMaxColorCount(Math.max(initialColors.length, 1));
       setActiveColorCount(Math.max(initialColors.length, 1));
@@ -1879,10 +1922,32 @@ export function useFabricCanvas() {
    */
   const simplifyColorsLive = useCallback((targetK: number) => {
     const canvas = fabricCanvasRef.current;
-    if (!canvas || masterPathsRef.current.length === 0) return;
+    if (!canvas) return;
+
+    if (masterPathsRef.current.length === 0) {
+      const objs = canvas.getObjects().filter((o) => (o as any).name !== 'crop-overlay' && (o as any).name !== 'lasso-preview');
+      if (objs.length === 0) return;
+      masterPathsRef.current = objs.map((obj) => {
+        const fillStr = ((obj.fill as string) || (obj as any)._originalFill || '#000000').trim().toUpperCase();
+        const bounds = obj.getBoundingRect();
+        return {
+          obj,
+          originalFill: (obj as any)._originalFill || fillStr,
+          originalStroke: typeof obj.stroke === 'string' ? obj.stroke : null,
+          originalStrokeWidth: obj.strokeWidth || 0,
+          area: bounds.width * bounds.height
+        };
+      });
+    }
+
+    const baselineColors = originalColorsRef.current.length > 0
+      ? originalColorsRef.current
+      : Array.from(new Set(masterPathsRef.current.map((item) => item.originalFill.toUpperCase())));
+
+    if (baselineColors.length === 0) return;
 
     setActiveColorCount(targetK);
-    const clusterMap = clusterColors(uniqueColorsRef.current, targetK);
+    const clusterMap = clusterColors(baselineColors, targetK);
 
     masterPathsRef.current.forEach((item) => {
       const orig = item.originalFill.toUpperCase();
@@ -1899,7 +1964,23 @@ export function useFabricCanvas() {
    */
   const simplifyDetailsLive = useCallback((percent: number) => {
     const canvas = fabricCanvasRef.current;
-    if (!canvas || masterPathsRef.current.length === 0) return;
+    if (!canvas) return;
+
+    if (masterPathsRef.current.length === 0) {
+      const objs = canvas.getObjects().filter((o) => (o as any).name !== 'crop-overlay' && (o as any).name !== 'lasso-preview');
+      if (objs.length === 0) return;
+      masterPathsRef.current = objs.map((obj) => {
+        const fillStr = ((obj.fill as string) || (obj as any)._originalFill || '#000000').trim().toUpperCase();
+        const bounds = obj.getBoundingRect();
+        return {
+          obj,
+          originalFill: (obj as any)._originalFill || fillStr,
+          originalStroke: typeof obj.stroke === 'string' ? obj.stroke : null,
+          originalStrokeWidth: obj.strokeWidth || 0,
+          area: bounds.width * bounds.height
+        };
+      });
+    }
 
     setActiveDetailPercent(percent);
 
@@ -1922,132 +2003,303 @@ export function useFabricCanvas() {
   }, []);
 
   /**
+   * Identifies and highlights the unified outer perimeter of the entire artwork
+   * (as if all layers were flattened into a solid sticker silhouette).
+   */
+  const updatePerimeterHighlight = useCallback((active?: boolean, colorOverride?: string) => {
+    const canvas = fabricCanvasRef.current;
+    if (!canvas) return;
+
+    const isActive = active !== undefined ? Boolean(active) : isPerimeterHighlightActiveRef.current;
+    if (!isActive) {
+      if (perimeterObjRef.current) {
+        canvas.remove(perimeterObjRef.current);
+        perimeterObjRef.current = null;
+      }
+      const existing = canvas.getObjects().filter((o) => (o as any).name === 'perimeter-highlight');
+      existing.forEach((o) => canvas.remove(o));
+      canvas.requestRenderAll();
+      return;
+    }
+
+    const objects = canvas.getObjects().filter((obj) => {
+      if (!obj.visible) return false;
+      const name = (obj as any).name;
+      return (
+        name !== 'crop-overlay' &&
+        name !== 'brush-preview' &&
+        name !== 'lasso-preview' &&
+        name !== 'perimeter-highlight' &&
+        !(obj as any).excludeFromExport
+      );
+    });
+
+    if (objects.length === 0) {
+      if (perimeterObjRef.current) {
+        canvas.remove(perimeterObjRef.current);
+        perimeterObjRef.current = null;
+        canvas.requestRenderAll();
+      }
+      return;
+    }
+
+    const pathStrings: string[] = [];
+    objects.forEach((obj) => {
+      const cmds = extractCommandsFromObject(obj);
+      if (cmds.length > 0) {
+        const d = commandsToD(cmds);
+        if (d && d.trim()) pathStrings.push(d.trim());
+      }
+    });
+
+    const perimeterD = computeOuterPerimeterD(pathStrings);
+
+    if (perimeterObjRef.current) {
+      canvas.remove(perimeterObjRef.current);
+      perimeterObjRef.current = null;
+    }
+
+    if (perimeterD && perimeterD.trim()) {
+      const strokeCol = colorOverride || perimeterColorRef.current;
+      const perimeterPath = createAbsoluteWorldPath(perimeterD, {
+        fill: null,
+        stroke: strokeCol,
+        strokeWidth: 3,
+        strokeDashArray: [6, 4],
+        strokeLineCap: 'round',
+        strokeLineJoin: 'round',
+        selectable: false,
+        evented: false,
+        hoverCursor: 'default',
+        hasControls: false,
+        hasBorders: false,
+        lockMovementX: true,
+        lockMovementY: true
+      });
+
+      (perimeterPath as any).name = 'perimeter-highlight';
+      (perimeterPath as any).excludeFromExport = true;
+      canvas.add(perimeterPath);
+      canvas.bringObjectToFront(perimeterPath);
+      perimeterObjRef.current = perimeterPath;
+    }
+
+    canvas.requestRenderAll();
+  }, []);
+
+  const togglePerimeterHighlight = useCallback((activeOverride?: any) => {
+    const isExplicitBool = typeof activeOverride === 'boolean';
+    setIsPerimeterHighlightActive((prev) => {
+      const next = isExplicitBool ? activeOverride : !prev;
+      isPerimeterHighlightActiveRef.current = next;
+      updatePerimeterHighlight(next);
+      return next;
+    });
+  }, [updatePerimeterHighlight]);
+
+  const changePerimeterColor = useCallback((color: string) => {
+    setPerimeterColor(color);
+    perimeterColorRef.current = color;
+    if (isPerimeterHighlightActiveRef.current) {
+      updatePerimeterHighlight(true, color);
+    }
+  }, [updatePerimeterHighlight]);
+
+  /**
    * On-the-Fly Vector Outline Smoothing
    * Smooths each isolated island vector on the selected layer (or all layers if none selected).
    */
-  const smoothOutlinesLive = useCallback((percent: number, explicitColor?: string | null) => {
-    const canvas = fabricCanvasRef.current;
-    if (!canvas || masterPathsRef.current.length === 0) return;
+  const smoothOutlinesLive = useCallback(
+    async (percent: number, explicitColor?: string | null) => {
+      const canvas = fabricCanvasRef.current;
+      if (!canvas || masterPathsRef.current.length === 0) return;
 
-    setOutlineSmoothing(percent);
+      prevSmoothingRef.current = outlineSmoothing;
+      isCancelledSmoothingRef.current = false;
+      setIsSmoothing(true);
+      setOutlineSmoothing(percent);
 
-    const allCuttable = canvas.getObjects().filter((obj) => {
-      if (!obj.visible) return false;
-      const name = (obj as any).name;
-      if (name === 'crop-overlay' || name === 'brush-preview' || (obj as any).excludeFromExport) return false;
-      return true;
-    });
+      // Yield execution so the progress popup renders on screen immediately
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      if (isCancelledSmoothingRef.current) {
+        setIsSmoothing(false);
+        setOutlineSmoothing(prevSmoothingRef.current);
+        return;
+      }
 
-    // Detect currently selected vector objects using Fabric's native getActiveObjects()
-    const currentSelectedObjects = canvas.getActiveObjects().filter((obj) => {
-      if (!obj.visible) return false;
-      const name = (obj as any).name;
-      return name !== 'crop-overlay' && name !== 'brush-preview' && !(obj as any).excludeFromExport;
-    });
+      try {
+        const allCuttable = canvas.getObjects().filter((obj) => {
+          if (!obj.visible) return false;
+          const name = (obj as any).name;
+          if (name === 'crop-overlay' || name === 'brush-preview' || (obj as any).excludeFromExport) return false;
+          return true;
+        });
 
-    const activeColor = explicitColor !== undefined ? explicitColor : selectedColor;
-    const targetColor = activeColor ? activeColor.trim().toUpperCase() : null;
+        // Detect currently selected vector objects using Fabric's native getActiveObjects()
+        const currentSelectedObjects = canvas.getActiveObjects().filter((obj) => {
+          if (!obj.visible) return false;
+          const name = (obj as any).name;
+          return name !== 'crop-overlay' && name !== 'brush-preview' && !(obj as any).excludeFromExport;
+        });
 
-    // RULE:
-    // Outline smoothing applies ONLY to the current selection (unless all in that layer are selected).
-    // If no objects are currently selected on the canvas, fallback to the targeted color layer, or all cuttable objects.
-    let objectsToProcess: FabricObject[] = [];
-    if (currentSelectedObjects.length > 0) {
-      objectsToProcess = currentSelectedObjects;
-    } else if (targetColor) {
-      objectsToProcess = allCuttable.filter((o) => ((o.fill as string) || '').trim().toUpperCase() === targetColor);
-    } else {
-      objectsToProcess = allCuttable;
-    }
+        const activeColor = explicitColor !== undefined ? explicitColor : selectedColor;
+        const targetColor = activeColor ? activeColor.trim().toUpperCase() : null;
 
-    if (objectsToProcess.length === 0) return;
-
-    // Store un-smoothed base path before discarding active selection so transform matrices are exact
-    objectsToProcess.forEach((obj) => {
-      if (!(obj as any)._baseSvgD) {
-        const cmds = extractCommandsFromObject(obj);
-        if (cmds.length > 0) {
-          (obj as any)._baseSvgD = commandsToD(cmds);
+        // RULE:
+        // Outline smoothing applies ONLY to the current selection (unless all in that layer are selected).
+        // If explicitColor is 'ALL', applies to all cuttable objects across all layers.
+        // If no objects are currently selected on the canvas, fallback to the targeted color layer, or all cuttable objects.
+        let objectsToProcess: FabricObject[] = [];
+        if (explicitColor === 'ALL') {
+          objectsToProcess = allCuttable;
+        } else if (currentSelectedObjects.length > 0) {
+          objectsToProcess = currentSelectedObjects;
+        } else if (targetColor) {
+          objectsToProcess = allCuttable.filter((o) => ((o.fill as string) || '').trim().toUpperCase() === targetColor);
+        } else {
+          objectsToProcess = allCuttable;
         }
+
+        if (objectsToProcess.length === 0) return;
+
+        // Store un-smoothed base path before discarding active selection so transform matrices are exact
+        objectsToProcess.forEach((obj) => {
+          if (!(obj as any)._baseSvgD) {
+            const cmds = extractCommandsFromObject(obj);
+            if (cmds.length > 0) {
+              (obj as any)._baseSvgD = commandsToD(cmds);
+            }
+          }
+        });
+
+        // Compute all smoothed paths in a non-destructive loop with cancellation checks
+        const computedReplacements: {
+          obj: FabricObject;
+          targetD: string;
+          baseD: string;
+          fill: string;
+          stroke: string | null;
+          strokeWidth: number;
+          wasInSelection: boolean;
+        }[] = [];
+
+        for (let i = 0; i < objectsToProcess.length; i++) {
+          if (isCancelledSmoothingRef.current) {
+            setOutlineSmoothing(prevSmoothingRef.current);
+            return;
+          }
+
+          // Yield to event loop every 3 objects to keep Cancel button clickable and responsive
+          if (i > 0 && i % 3 === 0) {
+            await new Promise((resolve) => setTimeout(resolve, 0));
+            if (isCancelledSmoothingRef.current) {
+              setOutlineSmoothing(prevSmoothingRef.current);
+              return;
+            }
+          }
+
+          const obj = objectsToProcess[i];
+          const baseD = (obj as any)._baseSvgD;
+          if (!baseD) continue;
+
+          const targetD = percent <= 0 ? baseD : smoothSvgPathString(baseD, percent);
+          if (!targetD || !targetD.trim()) continue;
+
+          computedReplacements.push({
+            obj,
+            targetD,
+            baseD,
+            fill: (obj.fill as string) || (obj as any)._originalFill || '#000000',
+            stroke: (obj.stroke as string) || (obj as any)._originalStroke || null,
+            strokeWidth: obj.strokeWidth || 0,
+            wasInSelection: currentSelectedObjects.includes(obj)
+          });
+        }
+
+        if (isCancelledSmoothingRef.current) {
+          setOutlineSmoothing(prevSmoothingRef.current);
+          return;
+        }
+
+        // Commit all replacements atomically
+        const replacementSelectedObjects: FabricObject[] = [];
+
+        // If an ActiveSelection was active, discard it before removing/adding replacement paths
+        const active = canvas.getActiveObject();
+        if (
+          active &&
+          (active instanceof ActiveSelection ||
+            (active as any).type?.toLowerCase() === 'activeselection' ||
+            typeof (active as any).getObjects === 'function')
+        ) {
+          canvas.discardActiveObject();
+        }
+
+        computedReplacements.forEach(({ obj, targetD, baseD, fill, stroke, strokeWidth, wasInSelection }) => {
+          const newPath = createAbsoluteWorldPath(targetD, {
+            fill,
+            stroke,
+            strokeWidth,
+            selectable: brushModeRef.current === 'none',
+            evented: brushModeRef.current === 'none',
+            hoverCursor: brushModeRef.current === 'none' ? 'pointer' : 'crosshair',
+            perPixelTargetFind: true
+          });
+
+          (newPath as any)._originalFill = (obj as any)._originalFill || fill;
+          (newPath as any)._originalStroke = stroke;
+          (newPath as any)._originalStrokeWidth = strokeWidth;
+          (newPath as any)._baseSvgD = baseD;
+
+          // Update in masterPathsRef
+          const itemIdx = masterPathsRef.current.findIndex((item) => item.obj === obj);
+          if (itemIdx !== -1) {
+            const b = newPath.getBoundingRect();
+            masterPathsRef.current[itemIdx] = {
+              obj: newPath,
+              originalFill: (newPath as any)._originalFill,
+              originalStroke: stroke,
+              originalStrokeWidth: strokeWidth,
+              area: b.width * b.height
+            };
+          }
+
+          canvas.remove(obj);
+          canvas.add(newPath);
+
+          if (wasInSelection) {
+            replacementSelectedObjects.push(newPath);
+          }
+        });
+
+        // Re-establish active selection so the user retains their selection uninterrupted
+        if (replacementSelectedObjects.length > 1) {
+          const as = new ActiveSelection(replacementSelectedObjects, { canvas });
+          applyDashedBoundingStyles(as);
+          canvas.setActiveObject(as);
+          setSelectedObject(as);
+        } else if (replacementSelectedObjects.length === 1) {
+          applyDashedBoundingStyles(replacementSelectedObjects[0]);
+          canvas.setActiveObject(replacementSelectedObjects[0]);
+          setSelectedObject(replacementSelectedObjects[0]);
+        }
+
+        canvas.renderAll();
+        refreshColorLayers();
+
+        if (isPerimeterHighlightActiveRef.current) {
+          updatePerimeterHighlight(true);
+        }
+
+        if (isWeedCheckActive) {
+          runWeedCheck(targetColor || undefined);
+        }
+      } finally {
+        setIsSmoothing(false);
       }
-    });
-
-    const replacementSelectedObjects: FabricObject[] = [];
-
-    // If an ActiveSelection was active, discard it before removing/adding replacement paths
-    const active = canvas.getActiveObject();
-    if (active && (active instanceof ActiveSelection || (active as any).type?.toLowerCase() === 'activeselection' || typeof (active as any).getObjects === 'function')) {
-      canvas.discardActiveObject();
-    }
-
-    objectsToProcess.forEach((obj) => {
-      const baseD = (obj as any)._baseSvgD;
-      if (!baseD) return;
-
-      const targetD = percent <= 0 ? baseD : smoothSvgPathString(baseD, percent);
-      if (!targetD || !targetD.trim()) return;
-
-      const fill = (obj.fill as string) || (obj as any)._originalFill || '#000000';
-      const stroke = (obj.stroke as string) || (obj as any)._originalStroke || null;
-      const strokeWidth = obj.strokeWidth || 0;
-
-      const wasInSelection = currentSelectedObjects.includes(obj);
-
-      const newPath = createAbsoluteWorldPath(targetD, {
-        fill,
-        stroke,
-        strokeWidth,
-        selectable: brushModeRef.current === 'none',
-        evented: brushModeRef.current === 'none',
-        hoverCursor: brushModeRef.current === 'none' ? 'pointer' : 'crosshair',
-        perPixelTargetFind: true
-      });
-
-      (newPath as any)._originalFill = (obj as any)._originalFill || fill;
-      (newPath as any)._originalStroke = stroke;
-      (newPath as any)._originalStrokeWidth = strokeWidth;
-      (newPath as any)._baseSvgD = baseD;
-
-      // Update in masterPathsRef
-      const itemIdx = masterPathsRef.current.findIndex((item) => item.obj === obj);
-      if (itemIdx !== -1) {
-        const b = newPath.getBoundingRect();
-        masterPathsRef.current[itemIdx] = {
-          obj: newPath,
-          originalFill: (newPath as any)._originalFill,
-          originalStroke: stroke,
-          originalStrokeWidth: strokeWidth,
-          area: b.width * b.height
-        };
-      }
-
-      canvas.remove(obj);
-      canvas.add(newPath);
-
-      if (wasInSelection) {
-        replacementSelectedObjects.push(newPath);
-      }
-    });
-
-    // Re-establish active selection so the user retains their selection uninterrupted
-    if (replacementSelectedObjects.length > 1) {
-      const as = new ActiveSelection(replacementSelectedObjects, { canvas });
-      applyDashedBoundingStyles(as);
-      canvas.setActiveObject(as);
-      setSelectedObject(as);
-    } else if (replacementSelectedObjects.length === 1) {
-      applyDashedBoundingStyles(replacementSelectedObjects[0]);
-      canvas.setActiveObject(replacementSelectedObjects[0]);
-      setSelectedObject(replacementSelectedObjects[0]);
-    }
-
-    canvas.renderAll();
-    refreshColorLayers();
-
-    if (isWeedCheckActive) {
-      runWeedCheck(targetColor || undefined);
-    }
-  }, [selectedColor, refreshColorLayers, isWeedCheckActive, runWeedCheck, applyDashedBoundingStyles]);
+    },
+    [outlineSmoothing, selectedColor, refreshColorLayers, isWeedCheckActive, runWeedCheck, applyDashedBoundingStyles, updatePerimeterHighlight]
+  );
 
   /**
    * Restores exact vector snapshot from canvas JSON without any coordinate drift or re-scaling
@@ -2093,8 +2345,11 @@ export function useFabricCanvas() {
 
       masterPathsRef.current = masterList;
       const initialColors = Array.from(colorSet);
+      if (originalColorsRef.current.length === 0 || originalColorsRef.current.length < initialColors.length) {
+        originalColorsRef.current = initialColors;
+      }
       uniqueColorsRef.current = initialColors;
-      setMaxColorCount(Math.max(initialColors.length, 1));
+      setMaxColorCount(Math.max(originalColorsRef.current.length, initialColors.length, 1));
       setActiveColorCount(Math.max(initialColors.length, 1));
       setActiveDetailPercent(100);
 
@@ -2163,6 +2418,7 @@ export function useFabricCanvas() {
    */
   const resetArtwork = useCallback(async () => {
     pushUndoSnapshot();
+    isArtworkFlattenedRef.current = false;
     setOutlineSmoothing(0);
     setBrushMode('none');
 
@@ -3195,8 +3451,9 @@ export function useFabricCanvas() {
       if (!canvas) return '';
 
       // Discard any active multi-selection so individual objects are serialized in absolute canvas coordinates
-      const hadSelection = !!canvas.getActiveObject();
-      if (hadSelection) {
+      const prevActive = canvas.getActiveObject();
+      const isSingleObj = prevActive && (prevActive as any).type !== 'activeSelection';
+      if (prevActive) {
         canvas.discardActiveObject();
         canvas.renderAll();
       }
@@ -3284,18 +3541,21 @@ export function useFabricCanvas() {
         settings: {
           units,
           matBackground,
-          vinylSettings
+          vinylSettings,
+          activeFlattenMode
         }
       };
 
-      // Restore selection if there was one
-      if (hadSelection && mode === 'vector' && objects.length > 0) {
-        selectAllVectors();
+      // Restore single object selection if one was active (without selecting all elements)
+      if (isSingleObj && prevActive) {
+        canvas.setActiveObject(prevActive);
+        canvas.renderAll();
       }
 
+      setIsDirty(false);
       return JSON.stringify(project, null, 2);
     },
-    [mode, units, matBackground, vinylSettings, selectAllVectors]
+    [mode, units, matBackground, vinylSettings, activeFlattenMode]
   );
 
   /**
@@ -3349,6 +3609,7 @@ export function useFabricCanvas() {
             if (data.settings.units) setUnits(data.settings.units);
             if (data.settings.matBackground) setMatBackground(data.settings.matBackground);
             if (data.settings.vinylSettings) setVinylSettingsState(data.settings.vinylSettings);
+            if (data.settings.activeFlattenMode) setActiveFlattenMode(data.settings.activeFlattenMode);
           }
 
           const hasVectorData = !!(svgContent && typeof svgContent === 'string' && svgContent.includes('<'));
@@ -3447,6 +3708,7 @@ export function useFabricCanvas() {
           setHasVector(hasVectorData);
           setHasImage(hasRasterData || hasVectorData);
           setMode(targetDisplayMode);
+          setIsDirty(false);
 
           return {
             success: true,
@@ -3746,20 +4008,22 @@ export function useFabricCanvas() {
         newColors.push(...flattenedLayers.map((l) => l.color));
 
         masterPathsRef.current = newMasterPaths;
+        originalColorsRef.current = newColors;
         uniqueColorsRef.current = newColors;
-        setMaxColorCount(Math.max(newColors.length, 2));
+        setMaxColorCount(Math.max(newColors.length, 1));
         setActiveColorCount(newColors.length);
 
         canvas.discardActiveObject();
         canvas.renderAll();
         refreshColorLayers();
         runWeedCheck();
+        isArtworkFlattenedRef.current = true;
       } catch (err) {
         console.error('[FlattenArtwork] Error during flattening:', err);
       } finally {
         const elapsed = Date.now() - startTime;
-        if (elapsed < 500) {
-          await new Promise((resolve) => setTimeout(resolve, 500 - elapsed));
+        if (elapsed < 50) {
+          await new Promise((resolve) => setTimeout(resolve, 50 - elapsed));
         }
         setIsFlattening(false);
       }
@@ -4222,17 +4486,6 @@ export function useFabricCanvas() {
     [isLineArt, lineArtPenWidth, applyLineArtStyling]
   );
 
-  const exportPng = useCallback((multiplier = 3): string => {
-    const canvas = fabricCanvasRef.current;
-    if (!canvas) return '';
-
-    return canvas.toDataURL({
-      format: 'png',
-      multiplier,
-      enableRetinaScaling: true
-    } as any);
-  }, []);
-
   const cancelCrop = useCallback(() => {
     const canvas = fabricCanvasRef.current;
     if (!canvas) return;
@@ -4260,7 +4513,7 @@ export function useFabricCanvas() {
 
     const objects = canvas
       .getObjects()
-      .filter((o) => o.visible && (o as any).name !== 'crop-overlay' && (o as any).name !== 'lasso-preview' && (o as any).name !== 'brush-preview');
+      .filter((o) => o.visible && (o as any).name !== 'crop-overlay' && (o as any).name !== 'lasso-preview' && (o as any).name !== 'brush-preview' && (o as any).name !== 'perimeter-highlight');
 
     if (objects.length === 0) return null;
 
@@ -4304,6 +4557,59 @@ export function useFabricCanvas() {
       centerY
     };
   }, []);
+
+  const exportPng = useCallback(
+    (multiplier = 3): string => {
+      const canvas = fabricCanvasRef.current;
+      if (!canvas) return '';
+
+      const extent = getArtworkExtentRect();
+      if (!extent || extent.width <= 0 || extent.height <= 0) {
+        return canvas.toDataURL({
+          format: 'png',
+          multiplier: 1,
+          enableRetinaScaling: false
+        } as any);
+      }
+
+      // Preserve current viewport transform
+      const origVpt: [number, number, number, number, number, number] = canvas.viewportTransform
+        ? [
+            canvas.viewportTransform[0],
+            canvas.viewportTransform[1],
+            canvas.viewportTransform[2],
+            canvas.viewportTransform[3],
+            canvas.viewportTransform[4],
+            canvas.viewportTransform[5]
+          ]
+        : [1, 0, 0, 1, 0, 0];
+      try {
+        // Temporarily reset viewportTransform to identity so canvas scene coordinates match 1:1
+        canvas.viewportTransform = [1, 0, 0, 1, 0, 0];
+
+        // Crop tightly around visible artwork with 16px border padding
+        const padding = 16;
+        const left = Math.max(0, extent.minX - padding);
+        const top = Math.max(0, extent.minY - padding);
+        const width = extent.width + padding * 2;
+        const height = extent.height + padding * 2;
+
+        return canvas.toDataURL({
+          format: 'png',
+          multiplier,
+          left,
+          top,
+          width,
+          height,
+          enableRetinaScaling: false
+        } as any);
+      } finally {
+        canvas.viewportTransform = origVpt;
+        canvas.requestRenderAll();
+      }
+    },
+    [getArtworkExtentRect]
+  );
 
   /**
    * Re-centers the view and sets zoom so the maximum extent rectangle of all image elements fills the view
@@ -5332,124 +5638,125 @@ export function useFabricCanvas() {
       return;
     }
 
-    // RASTER MODE CROPPING
-    const baseImg = canvas.getObjects().find((o) => o !== cropObj);
+    // RASTER MODE CROPPING: Maps crop boundaries with mathematical 1:1 precision directly to source image pixels
+    const baseImg = canvas.getObjects().find((o) => (o as any).name === 'raster-target' || (o.type === 'image' && o !== cropObj && (o as any).name !== 'crop-overlay')) as any;
     if (!baseImg) return;
 
     pushUndoSnapshot();
 
-    cropObj.set('visible', false);
-    canvas.renderAll();
+    const htmlImg = (typeof baseImg.getElement === 'function' ? baseImg.getElement() : baseImg._element) as HTMLImageElement;
+    const naturalW = htmlImg?.naturalWidth || baseImg.width || 500;
+    const naturalH = htmlImg?.naturalHeight || baseImg.height || 500;
 
-    const fullCanvasData = canvas.toDataURL({ format: 'png', multiplier: 1 } as any);
-    cropObj.set('visible', true);
+    baseImg.setCoords();
+    cropObj.setCoords();
 
-    const offscreenImg = new Image();
-    offscreenImg.crossOrigin = 'anonymous';
+    const imgW = baseImg.getScaledWidth ? baseImg.getScaledWidth() : (baseImg.width || 0) * (baseImg.scaleX || 1);
+    const imgH = baseImg.getScaledHeight ? baseImg.getScaledHeight() : (baseImg.height || 0) * (baseImg.scaleY || 1);
+    const imgL = baseImg.originX === 'center' ? (baseImg.left || 0) - imgW / 2 : (baseImg.left || 0);
+    const imgT = baseImg.originY === 'center' ? (baseImg.top || 0) - imgH / 2 : (baseImg.top || 0);
 
-    await new Promise<void>((resolve, reject) => {
-      offscreenImg.onload = () => resolve();
-      offscreenImg.onerror = reject;
-      offscreenImg.src = fullCanvasData;
-    });
+    const cropW = cropObj.getScaledWidth ? cropObj.getScaledWidth() : (cropObj.width || 0) * (cropObj.scaleX || 1);
+    const cropH = cropObj.getScaledHeight ? cropObj.getScaledHeight() : (cropObj.height || 0) * (cropObj.scaleY || 1);
+    const cropL = cropObj.originX === 'center' ? (cropObj.left || 0) - cropW / 2 : (cropObj.left || 0);
+    const cropT = cropObj.originY === 'center' ? (cropObj.top || 0) - cropH / 2 : (cropObj.top || 0);
 
-    const cropBounds = cropObj.getBoundingRect();
+    if (activeCropType === 'rect' || activeCropType === 'circle') {
+      const relL = (cropL - imgL) / imgW;
+      const relT = (cropT - imgT) / imgH;
+      const relW = cropW / imgW;
+      const relH = cropH / imgH;
 
-    if (activeCropType === 'rect') {
+      const srcX = Math.max(0, Math.min(naturalW, Math.round(relL * naturalW)));
+      const srcY = Math.max(0, Math.min(naturalH, Math.round(relT * naturalH)));
+      const srcW = Math.max(1, Math.min(naturalW - srcX, Math.round(relW * naturalW)));
+      const srcH = Math.max(1, Math.min(naturalH - srcY, Math.round(relH * naturalH)));
+
       const outCanvas = document.createElement('canvas');
-      outCanvas.width = Math.max(cropBounds.width, 10);
-      outCanvas.height = Math.max(cropBounds.height, 10);
+      outCanvas.width = srcW;
+      outCanvas.height = srcH;
       const ctx = outCanvas.getContext('2d');
       if (ctx) {
-        ctx.drawImage(
-          offscreenImg,
-          cropBounds.left,
-          cropBounds.top,
-          cropBounds.width,
-          cropBounds.height,
-          0,
-          0,
-          cropBounds.width,
-          cropBounds.height
-        );
+        if (activeCropType === 'circle') {
+          ctx.beginPath();
+          ctx.arc(srcW / 2, srcH / 2, Math.min(srcW, srcH) / 2, 0, Math.PI * 2);
+          ctx.clip();
+        }
+        ctx.drawImage(htmlImg, srcX, srcY, srcW, srcH, 0, 0, srcW, srcH);
         const resultUrl = outCanvas.toDataURL('image/png');
+        originalRasterRef.current = resultUrl;
         cancelCrop();
         await renderRasterInternal(resultUrl);
-      }
-    } else if (activeCropType === 'circle') {
-      const circleObj = cropObj as Circle;
-      const radius = (circleObj.radius || 50) * (circleObj.scaleX || 1);
-      const outCanvas = document.createElement('canvas');
-      outCanvas.width = Math.max(radius * 2, 10);
-      outCanvas.height = Math.max(radius * 2, 10);
-      const ctx = outCanvas.getContext('2d');
-      if (ctx) {
-        ctx.beginPath();
-        ctx.arc(radius, radius, radius, 0, Math.PI * 2);
-        ctx.clip();
-        ctx.drawImage(
-          offscreenImg,
-          cropBounds.left,
-          cropBounds.top,
-          cropBounds.width,
-          cropBounds.height,
-          0,
-          0,
-          radius * 2,
-          radius * 2
-        );
-        const resultUrl = outCanvas.toDataURL('image/png');
-        cancelCrop();
-        await renderRasterInternal(resultUrl);
+        setIsDirty(true);
       }
     } else if (activeCropType === 'lasso-freehand' || activeCropType === 'lasso-polygon') {
       const points = lassoPointsRef.current;
       if (points.length < 3) return;
+
+      let lMinX = Infinity, lMinY = Infinity, lMaxX = -Infinity, lMaxY = -Infinity;
+      points.forEach((p) => {
+        lMinX = Math.min(lMinX, p.x);
+        lMinY = Math.min(lMinY, p.y);
+        lMaxX = Math.max(lMaxX, p.x);
+        lMaxY = Math.max(lMaxY, p.y);
+      });
+
+      const relL = (lMinX - imgL) / imgW;
+      const relT = (lMinY - imgT) / imgH;
+      const relW = (lMaxX - lMinX) / imgW;
+      const relH = (lMaxY - lMinY) / imgH;
+
+      const srcX = Math.max(0, Math.min(naturalW, Math.round(relL * naturalW)));
+      const srcY = Math.max(0, Math.min(naturalH, Math.round(relT * naturalH)));
+      const srcW = Math.max(1, Math.min(naturalW - srcX, Math.round(relW * naturalW)));
+      const srcH = Math.max(1, Math.min(naturalH - srcY, Math.round(relH * naturalH)));
 
       const outCanvas = document.createElement('canvas');
       const ctx = outCanvas.getContext('2d');
       if (!ctx) return;
 
       if (action === 'crop') {
-        outCanvas.width = Math.max(cropBounds.width, 10);
-        outCanvas.height = Math.max(cropBounds.height, 10);
+        outCanvas.width = srcW;
+        outCanvas.height = srcH;
         ctx.beginPath();
-        ctx.moveTo(points[0].x - cropBounds.left, points[0].y - cropBounds.top);
+        const mapPoint = (p: { x: number; y: number }) => ({
+          x: ((p.x - imgL) / imgW) * naturalW - srcX,
+          y: ((p.y - imgT) / imgH) * naturalH - srcY
+        });
+        const first = mapPoint(points[0]);
+        ctx.moveTo(first.x, first.y);
         for (let i = 1; i < points.length; i++) {
-          ctx.lineTo(points[i].x - cropBounds.left, points[i].y - cropBounds.top);
+          const pt = mapPoint(points[i]);
+          ctx.lineTo(pt.x, pt.y);
         }
         ctx.closePath();
         ctx.clip();
-
-        ctx.drawImage(
-          offscreenImg,
-          cropBounds.left,
-          cropBounds.top,
-          cropBounds.width,
-          cropBounds.height,
-          0,
-          0,
-          cropBounds.width,
-          cropBounds.height
-        );
+        ctx.drawImage(htmlImg, srcX, srcY, srcW, srcH, 0, 0, srcW, srcH);
       } else {
-        outCanvas.width = offscreenImg.width;
-        outCanvas.height = offscreenImg.height;
-        ctx.drawImage(offscreenImg, 0, 0);
-
+        outCanvas.width = naturalW;
+        outCanvas.height = naturalH;
+        ctx.drawImage(htmlImg, 0, 0);
         ctx.globalCompositeOperation = 'destination-out';
         ctx.beginPath();
-        ctx.moveTo(points[0].x, points[0].y);
+        const mapFull = (p: { x: number; y: number }) => ({
+          x: ((p.x - imgL) / imgW) * naturalW,
+          y: ((p.y - imgT) / imgH) * naturalH
+        });
+        const first = mapFull(points[0]);
+        ctx.moveTo(first.x, first.y);
         for (let i = 1; i < points.length; i++) {
-          ctx.lineTo(points[i].x, points[i].y);
+          const pt = mapFull(points[i]);
+          ctx.lineTo(pt.x, pt.y);
         }
         ctx.closePath();
         ctx.fill();
       }
 
       const resultUrl = outCanvas.toDataURL('image/png');
+      originalRasterRef.current = resultUrl;
       cancelCrop();
       await renderRasterInternal(resultUrl);
+      setIsDirty(true);
     }
   }, [activeCropType, cancelCrop, renderRasterInternal, pushUndoSnapshot, selectAllVectors, refreshColorLayers, isWeedCheckActive, runWeedCheck]);
 
@@ -5532,6 +5839,8 @@ export function useFabricCanvas() {
     saveCurrentVectorSnapshot,
     hasOriginalRaster: !!originalRasterRef.current,
     hasOriginalVector: !!originalVectorRef.current,
+    isDirty,
+    setIsDirty,
     compareData,
     getCompareData,
     // Cropping Suite API
@@ -5604,8 +5913,16 @@ export function useFabricCanvas() {
     isResizingBrush,
     brushResizePos,
     // Vector Outline Smoothing Engine
+    isSmoothing,
     outlineSmoothing,
     setOutlineSmoothing: smoothOutlinesLive,
+    cancelSmoothing,
+    // Outer Perimeter & Sticker Cut Engine
+    isPerimeterHighlightActive,
+    togglePerimeterHighlight,
+    perimeterColor,
+    setPerimeterColor: changePerimeterColor,
+    refreshPerimeterHighlight: () => updatePerimeterHighlight(),
     // Project Save & Load Engine
     exportProjectJSON,
     loadProjectJSON

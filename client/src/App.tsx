@@ -9,10 +9,13 @@ import { CompareInspector } from './components/Compare/CompareInspector';
 import { SettingsModal } from './components/SettingsModal';
 import { ExportModal } from './components/ExportModal';
 import { AboutModal } from './components/AboutModal';
+import { UnsavedChangesModal } from './components/UnsavedChangesModal';
 import { FlattenProgressOverlay } from './components/Canvas/FlattenProgressOverlay';
+import { SmoothingProgressOverlay } from './components/Canvas/SmoothingProgressOverlay';
 import { CanvasContextMenu } from './components/Canvas/CanvasContextMenu';
 import { getStoredCustomColors } from './services/customPalette';
 import { type PenInfillOptions } from './services/penInfill';
+import { type CricutExportOptions } from './services/cricutSvgExporter';
 import { useFabricCanvas, type CanvasMode } from './hooks/useFabricCanvas';
 import { useBackgroundRemover } from './hooks/useBackgroundRemover';
 import {
@@ -137,11 +140,19 @@ export function App() {
     setActiveBrushColor,
     isResizingBrush,
     brushResizePos,
+    isSmoothing,
     outlineSmoothing,
     setOutlineSmoothing,
+    cancelSmoothing,
+    isPerimeterHighlightActive,
+    togglePerimeterHighlight,
+    perimeterColor,
+    setPerimeterColor,
     compareData,
     exportProjectJSON,
-    loadProjectJSON
+    loadProjectJSON,
+    isDirty,
+    setIsDirty
   } = useFabricCanvas();
 
   const { removeBg, isRemoving: isRemovingBg, progress: bgProgress, statusText: bgStatusText } = useBackgroundRemover();
@@ -164,6 +175,34 @@ export function App() {
     message: string;
   } | null>(null);
 
+  // Unsaved changes confirmation dialog state
+  const [pendingUnsavedAction, setPendingUnsavedAction] = useState<{
+    title: string;
+    description: string;
+    action: () => void;
+  } | null>(null);
+
+  const confirmIfDirty = (title: string, description: string, action: () => void) => {
+    if (isDirty) {
+      setPendingUnsavedAction({ title, description, action });
+    } else {
+      action();
+    }
+  };
+
+  // Browser navigation/tab reload confirmation guard
+  useEffect(() => {
+    const handleBeforeUnload = (e: BeforeUnloadEvent) => {
+      if (isDirty) {
+        e.preventDefault();
+        e.returnValue = '';
+        return '';
+      }
+    };
+    window.addEventListener('beforeunload', handleBeforeUnload);
+    return () => window.removeEventListener('beforeunload', handleBeforeUnload);
+  }, [isDirty]);
+
   // Download helper utility
   const triggerDownload = (data: string, filename: string, mimeType: string) => {
     const blob = new Blob([data], { type: mimeType });
@@ -180,7 +219,7 @@ export function App() {
   /**
    * Phase 1: Handle AI Concept Generation
    */
-  const handleGenerate = async (prompt: string, aspectRatio: '1:1' | '4:5' | '16:9', stylePreset: string) => {
+  const performGenerate = async (prompt: string, aspectRatio: '1:1' | '4:5' | '16:9', stylePreset: string) => {
     setIsGenerating(true);
     setActivePrompt(prompt);
     setCurrentProjectName(prompt.slice(0, 28).trim() || 'Cricut Design');
@@ -204,7 +243,7 @@ export function App() {
         setMode('vector');
         setStatusBanner({
           type: 'success',
-          message: `${res.model || 'Gemini 3.6 Flash'} generated crisp SVG vector artwork! Adjust vinyl mats & detail below.`
+          message: `${res.model || 'Gemini 3.6 Flash'} generated crisp SVG vector artwork! Adjust vinyl layers & detail below.`
         });
       } else {
         await loadRasterImage(res.image, true);
@@ -226,6 +265,16 @@ export function App() {
     } finally {
       setIsGenerating(false);
     }
+  };
+
+  const handleGenerate = (prompt: string, aspectRatio: '1:1' | '4:5' | '16:9', stylePreset: string) => {
+    confirmIfDirty(
+      'Generate New Concept',
+      'Generating a new AI concept will replace your current canvas. Would you like to save your project before continuing?',
+      () => {
+        void performGenerate(prompt, aspectRatio, stylePreset);
+      }
+    );
   };
 
   /**
@@ -322,7 +371,7 @@ export function App() {
 
         setStatusBanner({
           type: 'success',
-          message: `Vectorized into ${res.stats.colorCount} Cricut vinyl mats (${res.stats.pathCount} paths, ${res.stats.nodeCount} smooth nodes)!`
+          message: `Vectorized into ${res.stats.colorCount} Cricut vinyl layers (${res.stats.pathCount} paths, ${res.stats.nodeCount} smooth nodes)!`
         });
       } else {
         throw new Error(res.error || 'Vectorization failed');
@@ -339,17 +388,23 @@ export function App() {
   };
 
   const handleOpenProject = () => {
-    if (fileInputRef.current) {
-      fileInputRef.current.value = '';
-      fileInputRef.current.click();
-    }
+    confirmIfDirty(
+      'Open Project / File',
+      'Opening another project or file will replace your current workspace. Would you like to save your project before continuing?',
+      () => {
+        if (fileInputRef.current) {
+          fileInputRef.current.value = '';
+          fileInputRef.current.click();
+        }
+      }
+    );
   };
 
   const handleLoadProjectFile = (file: File) => {
     const isImage = file.type.startsWith('image/') && !file.type.includes('svg');
     const isImageExt = /\.(png|jpe?g|webp|bmp|gif)$/i.test(file.name);
     if (isImage || isImageExt) {
-      handleUploadImage(file);
+      performUploadImage(file);
       return;
     }
 
@@ -364,6 +419,7 @@ export function App() {
       if (isSvgFile) {
         await loadVectorSvg(content, true);
         setMode('vector');
+        setIsDirty(false);
         setCurrentProjectName(file.name.replace(/\.svg$/i, ''));
         setStatusBanner({
           type: 'success',
@@ -377,6 +433,7 @@ export function App() {
         if (result.mode) {
           setMode(result.mode);
         }
+        setIsDirty(false);
         setCurrentProjectName(file.name.replace(/\.(vectarly|json)$/i, ''));
         confetti({
           particleCount: 50,
@@ -409,7 +466,7 @@ export function App() {
    * Imports raster image onto canvas in raster cleanup mode without auto-converting.
    * User can click "Convert to SVG Vectors" when ready.
    */
-  const handleUploadImage = (file: File) => {
+  const performUploadImage = (file: File) => {
     if (
       file.name.toLowerCase().endsWith('.vectarly') ||
       file.name.toLowerCase().endsWith('.json') ||
@@ -424,6 +481,7 @@ export function App() {
       const dataUrl = reader.result as string;
       await loadRasterImage(dataUrl, true);
       setMode('raster');
+      setIsDirty(false);
 
       setStatusBanner({
         type: 'info',
@@ -431,6 +489,16 @@ export function App() {
       });
     };
     reader.readAsDataURL(file);
+  };
+
+  const handleUploadImage = (file: File) => {
+    confirmIfDirty(
+      'Import Image / Project',
+      `Importing "${file.name}" will start a new project workspace. Would you like to save your project before continuing?`,
+      () => {
+        performUploadImage(file);
+      }
+    );
   };
 
   /**
@@ -462,15 +530,16 @@ export function App() {
   /**
    * Load Curated Samples
    */
-  const handleSelectSample = async (sampleKey: string, isInitialMount = false) => {
+  const performSelectSample = async (sampleKey: string, isInitialMount = false) => {
     try {
       if (sampleKey === 'vectarly') {
         setCurrentProjectName('Vectarly Logo');
         await loadRasterImage('/samples/vectarly-logo.jpg', !isInitialMount);
         setMode('raster');
+        setIsDirty(false);
         setStatusBanner({
           type: 'info',
-          message: 'Loaded Vectarly Logo! Click "Convert to SVG Vectors" to vectorize into clean cut mats.'
+          message: 'Loaded Vectarly Logo! Click "Convert to SVG Vectors" to vectorize into clean cut layers.'
         });
         return;
       }
@@ -481,6 +550,7 @@ export function App() {
         setCurrentProjectName(sample.title || sampleKey);
         await loadRasterImage(sample.dataUrl, true);
         setMode('raster');
+        setIsDirty(false);
         setStatusBanner({
           type: 'info',
           message: `Loaded sample: "${sample.title}". Click "Convert to SVG Vectors" to vectorize!`
@@ -489,13 +559,28 @@ export function App() {
     } catch (err) {
       console.error('Error loading sample:', err);
       await loadRasterImage('/samples/vectarly-logo.jpg', false);
+      setIsDirty(false);
+    }
+  };
+
+  const handleSelectSample = (sampleKey: string, isInitialMount = false) => {
+    if (isInitialMount) {
+      void performSelectSample(sampleKey, true);
+    } else {
+      confirmIfDirty(
+        'Load Sample',
+        'Loading a sample design will replace your current workspace. Would you like to save your project before continuing?',
+        () => {
+          void performSelectSample(sampleKey, false);
+        }
+      );
     }
   };
 
   /**
    * Phase 5: Exporting Functions
    */
-  const handleExportSvg = (options?: { isLineArt?: boolean; penInfill?: PenInfillOptions }) => {
+  const handleExportSvg = (options?: CricutExportOptions) => {
     const svgData = exportSvg(options);
     if (!svgData) return;
     const suffix = options?.penInfill?.enabled
@@ -506,7 +591,7 @@ export function App() {
     triggerDownload(svgData, `craftly-cricut${suffix}-${Date.now()}.svg`, 'image/svg+xml');
     setStatusBanner({
       type: 'success',
-      message: `Exported Cricut SVG${options?.penInfill?.enabled ? ' with Solid Pen Infill' : ''}!`
+      message: `Exported Cricut SVG${options?.penInfill?.enabled ? ' with Solid Pen Infill' : ''}! (${options?.flattenMode === 'stacked' || activeFlattenMode === 'stacked' ? 'Solid Stacked' : 'Knockout Inlay'})`
     });
   };
 
@@ -578,6 +663,31 @@ export function App() {
     handleSelectSample('vectarly', true);
   }, []);
 
+  const handleSaveAndContinue = () => {
+    handleSaveProject();
+    const nextAction = pendingUnsavedAction?.action;
+    setPendingUnsavedAction(null);
+    setIsDirty(false);
+    if (nextAction) {
+      setTimeout(() => {
+        nextAction();
+      }, 150);
+    }
+  };
+
+  const handleDiscardAndContinue = () => {
+    const nextAction = pendingUnsavedAction?.action;
+    setPendingUnsavedAction(null);
+    setIsDirty(false);
+    if (nextAction) {
+      nextAction();
+    }
+  };
+
+  const handleCancelUnsavedAction = () => {
+    setPendingUnsavedAction(null);
+  };
+
   return (
     <div className="flex flex-col h-screen w-screen overflow-hidden bg-craft-bg text-craft-text select-none">
       {/* Hidden File Input for Loading Projects (.vectarly, .json, .svg, and images) */}
@@ -606,6 +716,7 @@ export function App() {
         onSelectSample={handleSelectSample}
         onSaveProject={handleSaveProject}
         onOpenProject={handleOpenProject}
+        isDirty={isDirty}
         stats={vectorStats}
       />
 
@@ -795,7 +906,12 @@ export function App() {
             activeBrushColor={activeBrushColor}
             onSelectBrushColor={setActiveBrushColor}
             outlineSmoothing={outlineSmoothing}
+            isSmoothing={isSmoothing}
             onSmoothOutlines={setOutlineSmoothing}
+            isPerimeterHighlightActive={isPerimeterHighlightActive}
+            onTogglePerimeterHighlight={togglePerimeterHighlight}
+            perimeterColor={perimeterColor}
+            onChangePerimeterColor={setPerimeterColor}
           />
         ) : (
           <CompareInspector
@@ -848,6 +964,7 @@ export function App() {
         isLineArtActive={isLineArt}
         matsCount={colorLayers.length || vectorStats?.colorCount || 1}
         vinylSettings={vinylSettings}
+        activeFlattenMode={activeFlattenMode}
       />
 
       {/* About Splash Modal */}
@@ -860,6 +977,13 @@ export function App() {
       <FlattenProgressOverlay
         isFlattening={isFlattening}
         mode={activeFlattenMode}
+      />
+
+      {/* Smoothing Progress Popup Prompt */}
+      <SmoothingProgressOverlay
+        isSmoothing={isSmoothing}
+        percent={outlineSmoothing}
+        onCancel={cancelSmoothing}
       />
 
       {/* Unified Right-Click Context Menu for Canvas Elements & Active Mat Cards */}
@@ -890,6 +1014,16 @@ export function App() {
           onChangeColor={changeSelectedObjectColor}
         />
       )}
+
+      {/* Unsaved Changes Confirmation Dialog */}
+      <UnsavedChangesModal
+        isOpen={!!pendingUnsavedAction}
+        title={pendingUnsavedAction?.title}
+        description={pendingUnsavedAction?.description}
+        onSave={handleSaveAndContinue}
+        onDiscard={handleDiscardAndContinue}
+        onCancel={handleCancelUnsavedAction}
+      />
     </div>
   );
 }

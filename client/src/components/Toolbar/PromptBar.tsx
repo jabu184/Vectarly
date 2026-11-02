@@ -31,7 +31,7 @@ export const PromptBar: React.FC<PromptBarProps> = ({
   const stylePresets = [
     { id: 'Bold Die-Cut Sticker', label: 'Bold Die-Cut Sticker', badge: 'Vinyl Decal' },
     { id: 'Clean Line Art', label: 'Clean Line Art', badge: 'Cricut Pen' },
-    { id: 'Minimalist Kawaii', label: 'Minimalist Kawaii', badge: 'Pastel Mats' },
+    { id: 'Minimalist Kawaii', label: 'Minimalist Kawaii', badge: 'Pastel Layers' },
     { id: 'Vintage Vinyl Patch', label: 'Vintage Vinyl Patch', badge: 'Multi-Layer' }
   ];
 

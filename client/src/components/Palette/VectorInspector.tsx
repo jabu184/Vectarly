@@ -89,7 +89,13 @@ interface VectorInspectorProps {
   onSelectBrushColor?: (color: string) => void;
   // Vector Outline Smoothing
   outlineSmoothing?: number;
+  isSmoothing?: boolean;
   onSmoothOutlines?: (percent: number, targetColor?: string | null) => void;
+  // Outer Perimeter & Sticker Cut
+  isPerimeterHighlightActive?: boolean;
+  onTogglePerimeterHighlight?: () => void;
+  perimeterColor?: string;
+  onChangePerimeterColor?: (color: string) => void;
 }
 
 export const VectorInspector: React.FC<VectorInspectorProps> = ({
@@ -139,9 +145,27 @@ export const VectorInspector: React.FC<VectorInspectorProps> = ({
   activeBrushColor,
   onSelectBrushColor,
   outlineSmoothing = 0,
+  isSmoothing = false,
   onSmoothOutlines,
-  onReorderColorLayers
+  onReorderColorLayers,
+  isPerimeterHighlightActive = false,
+  onTogglePerimeterHighlight,
+  perimeterColor = '#06b6d4',
+  onChangePerimeterColor
 }) => {
+  const [localSmoothing, setLocalSmoothing] = useState<number>(outlineSmoothing);
+
+  useEffect(() => {
+    setLocalSmoothing(outlineSmoothing);
+  }, [outlineSmoothing]);
+
+  const handleCommitSmoothing = (val: number, targetColor?: string | null) => {
+    if (val === outlineSmoothing) return;
+    if (onSmoothOutlines) {
+      onSmoothOutlines(val, targetColor !== undefined ? targetColor : 'ALL');
+    }
+  };
+
   const [hiddenLayers, setHiddenLayers] = useState<Record<string, boolean>>({});
   const [internalSelectedMatColors, setInternalSelectedMatColors] = useState<string[]>([]);
   const selectedMatColors = selectedMatColorsProp !== undefined ? selectedMatColorsProp : internalSelectedMatColors;
@@ -163,6 +187,7 @@ export const VectorInspector: React.FC<VectorInspectorProps> = ({
   // Nestable / Collapsible RHS Cards: Layers is un-nested by default, others are nested
   const [isLayersOpen, setIsLayersOpen] = useState<boolean>(true);
   const [isSimplificationOpen, setIsSimplificationOpen] = useState<boolean>(false);
+  const [isPerimeterOpen, setIsPerimeterOpen] = useState<boolean>(false);
   const [isReadinessOpen, setIsReadinessOpen] = useState<boolean>(false);
   const [isLineArtOpen, setIsLineArtOpen] = useState<boolean>(false);
 
@@ -200,9 +225,9 @@ export const VectorInspector: React.FC<VectorInspectorProps> = ({
     }
   };
 
-  const currentMatCount = layers.length > 0 ? layers.length : (activeColorCount || 1);
-  const maxColors = Math.max(maxColorCount, layers.length, 2);
-  const displayColorCount = Math.min(Math.max(currentMatCount, 2), maxColors);
+  const currentLayerCount = layers.length > 0 ? layers.length : (activeColorCount || 1);
+  const maxColors = Math.max(maxColorCount, layers.length, 1);
+  const sliderValue = Math.min(Math.max(activeColorCount || currentLayerCount, 1), maxColors);
 
   return (
     <div className="w-80 lg:w-96 bg-white border-l border-craft-border h-full flex flex-col justify-between overflow-y-auto p-4 space-y-5">
@@ -214,7 +239,7 @@ export const VectorInspector: React.FC<VectorInspectorProps> = ({
               <span className="p-1.5 rounded-lg bg-indigo-50 text-indigo-600">
                 <PenTool className="w-4 h-4" />
               </span>
-              <h3 className="font-extrabold text-sm text-craft-text">Vector Studio &amp; Mats</h3>
+              <h3 className="font-extrabold text-sm text-craft-text">Vector Studio &amp; Layers</h3>
             </div>
             <div className="flex items-center gap-1.5">
               {onResetArtwork && (
@@ -240,8 +265,8 @@ export const VectorInspector: React.FC<VectorInspectorProps> = ({
         {/* Vector Stats Summary Card */}
         <div className="grid grid-cols-3 gap-2 bg-slate-50/80 p-3 rounded-2xl border border-slate-200/80 text-center">
           <div>
-            <p className="text-[10px] uppercase font-bold text-slate-400">Vinyl Mats</p>
-            <p className="text-sm font-extrabold text-indigo-600 mt-0.5">{currentMatCount}</p>
+            <p className="text-[10px] uppercase font-bold text-slate-400">Vinyl Layers</p>
+            <p className="text-sm font-extrabold text-indigo-600 mt-0.5">{currentLayerCount}</p>
           </div>
           <div className="border-x border-slate-200">
             <p className="text-[10px] uppercase font-bold text-slate-400">Total Paths</p>
@@ -299,7 +324,7 @@ export const VectorInspector: React.FC<VectorInspectorProps> = ({
                     />
                     <div className="min-w-0">
                       <p className="font-bold text-[11px] truncate">
-                        {selectedMatColors.length} Mats Selected
+                        {selectedMatColors.length} Layers Selected
                       </p>
                       <p className="text-[10px] text-indigo-600 truncate">
                         Target: <span className="font-mono font-bold">{selectedMatColors[0]}</span> (1st selected)
@@ -314,7 +339,7 @@ export const VectorInspector: React.FC<VectorInspectorProps> = ({
                         setSelectedMatColors([]);
                       }}
                       className="px-2.5 py-1.5 rounded-lg bg-indigo-600 hover:bg-indigo-700 text-white font-bold text-[11px] flex items-center gap-1 shadow-xs transition-all cursor-pointer"
-                      title="Combine all selected mats into the first selected color"
+                      title="Combine all selected layers into the first selected color"
                     >
                       <Layers className="w-3.5 h-3.5" />
                       <span>Combine</span>
@@ -515,7 +540,7 @@ export const VectorInspector: React.FC<VectorInspectorProps> = ({
                                 : 'hover:scale-105'
                             }`}
                             style={{ backgroundColor: layer.color }}
-                            title="Drag this color square onto another mat to merge layers"
+                            title="Drag this color square onto another layer to merge layers"
                           >
                             {isSwatchMergeTarget && (
                               <div className="w-2.5 h-2.5 rounded-full bg-white shadow-xs animate-ping" />
@@ -542,11 +567,11 @@ export const VectorInspector: React.FC<VectorInspectorProps> = ({
                               />
                             </label>
                             <span className="text-[10px] bg-slate-100 text-slate-600 px-1.5 py-0.2 rounded font-medium">
-                              Mat {index + 1}
+                              Layer {index + 1}
                             </span>
                             {isSwatchMergeTarget && (
                               <span className="text-[9px] bg-indigo-600 text-white px-1.5 py-0.2 rounded font-bold animate-pulse">
-                                Merge into this Mat
+                                Merge into this Layer
                               </span>
                             )}
                             {!isSwatchMergeTarget && index === 0 && (
@@ -618,8 +643,8 @@ export const VectorInspector: React.FC<VectorInspectorProps> = ({
                               }`}
                               title={
                                 brushMode === 'paint' && areColorsMatching(activeBrushColor, layer.color)
-                                  ? 'Currently Painting this mat (Click to exit)'
-                                  : 'Paint on this vinyl mat'
+                                  ? 'Currently Painting this layer (Click to exit)'
+                                  : 'Paint on this vinyl layer'
                               }
                             >
                               <Paintbrush className="w-3.5 h-3.5" />
@@ -643,8 +668,8 @@ export const VectorInspector: React.FC<VectorInspectorProps> = ({
                               }`}
                               title={
                                 brushMode === 'erase' && areColorsMatching(activeBrushColor, layer.color)
-                                  ? 'Currently Erasing this mat (Click to exit)'
-                                  : 'Erase cuts from this vinyl mat'
+                                  ? 'Currently Erasing this layer (Click to exit)'
+                                  : 'Erase cuts from this vinyl layer'
                               }
                             >
                               <Eraser className="w-3.5 h-3.5" />
@@ -668,8 +693,8 @@ export const VectorInspector: React.FC<VectorInspectorProps> = ({
                               }`}
                               title={
                                 brushMode === 'fill' && areColorsMatching(activeBrushColor, layer.color)
-                                  ? 'Currently in Fill mode for this mat (Click to exit)'
-                                  : 'Fill closed loops on this vinyl mat'
+                                  ? 'Currently in Fill mode for this layer (Click to exit)'
+                                  : 'Fill closed loops on this vinyl layer'
                               }
                             >
                               <PaintBucket className="w-3.5 h-3.5" />
@@ -681,7 +706,7 @@ export const VectorInspector: React.FC<VectorInspectorProps> = ({
                           className={`p-1.5 rounded-lg transition-colors ${
                             isHidden ? 'text-slate-400 hover:text-slate-600' : 'text-slate-600 hover:text-indigo-600'
                           }`}
-                          title={isHidden ? 'Show vinyl mat' : 'Hide vinyl mat'}
+                          title={isHidden ? 'Show vinyl layer' : 'Hide vinyl layer'}
                         >
                           {isHidden ? <EyeOff className="w-3.5 h-3.5" /> : <Eye className="w-3.5 h-3.5" />}
                         </button>
@@ -751,7 +776,7 @@ export const VectorInspector: React.FC<VectorInspectorProps> = ({
             </div>
             <div className="flex items-center gap-1.5">
               <span className="text-[10px] bg-indigo-100 text-indigo-700 font-bold px-2 py-0.5 rounded-full">
-                {displayColorCount} Colors
+                {currentLayerCount} Colors
               </span>
               {isSimplificationOpen ? (
                 <ChevronDown className="w-4 h-4 text-indigo-400" />
@@ -767,26 +792,26 @@ export const VectorInspector: React.FC<VectorInspectorProps> = ({
                 Adjust colors and shapes live without reconverting or generating again.
               </p>
 
-          {/* 1. Live Color / Vinyl Mat Simplifier */}
+          {/* 1. Live Color / Vinyl Layer Simplifier */}
           <div>
             <div className="flex justify-between text-xs font-medium text-craft-text mb-1">
-              <span>Vinyl Cutting Mats</span>
+              <span>Vinyl Cutting Layers</span>
               <span className="text-indigo-600 font-mono font-bold">
-                {currentMatCount} {currentMatCount === 1 ? 'Mat' : 'Mats'}
+                {currentLayerCount} {currentLayerCount === 1 ? 'Layer' : 'Layers'}
               </span>
             </div>
             <input
               type="range"
-              min="2"
+              min="1"
               max={maxColors}
-              value={displayColorCount}
+              value={sliderValue}
               onChange={(e) => onSimplifyColors(parseInt(e.target.value, 10))}
-              disabled={maxColors <= 2}
+              disabled={maxColors <= 1}
               className="w-full accent-indigo-600 cursor-pointer disabled:opacity-40"
             />
             <div className="flex justify-between text-[10px] text-slate-400 font-mono">
-              <span>2 (Simple)</span>
-              <span>{Math.round(maxColors / 2)}</span>
+              <span>1 (Single Layer)</span>
+              <span>{Math.max(1, Math.round(maxColors / 2))}</span>
               <span>{maxColors} (Original)</span>
             </div>
           </div>
@@ -857,7 +882,7 @@ export const VectorInspector: React.FC<VectorInspectorProps> = ({
                           className="w-2 h-2 rounded-full border border-black/20"
                           style={{ backgroundColor: activeTargetColor || '#000' }}
                         />
-                        <span>Selected Mat ({activeTargetColor}) — All {selectedCount} Elements</span>
+                        <span>Selected Layer ({activeTargetColor}) — All {selectedCount} Elements</span>
                       </span>
                     );
                   } else {
@@ -880,13 +905,13 @@ export const VectorInspector: React.FC<VectorInspectorProps> = ({
                         className="w-2 h-2 rounded-full border border-black/20"
                         style={{ backgroundColor: activeTargetColor }}
                       />
-                      <span>Selected Mat ({activeTargetColor})</span>
+                      <span>Selected Layer ({activeTargetColor})</span>
                     </span>
                   );
                 } else {
                   scopeLabel = (
                     <span className="font-bold text-slate-600 bg-slate-200/70 px-1.5 py-0.5 rounded-md">
-                      All Mats (Entire Artwork)
+                      All Layers (Entire Artwork)
                     </span>
                   );
                 }
@@ -903,9 +928,16 @@ export const VectorInspector: React.FC<VectorInspectorProps> = ({
                       min="0"
                       max="100"
                       step="1"
-                      value={outlineSmoothing}
-                      onChange={(e) => onSmoothOutlines(parseInt(e.target.value, 10), activeTargetColor)}
-                      className="w-full accent-indigo-600 cursor-pointer"
+                      value={localSmoothing}
+                      disabled={isSmoothing}
+                      onChange={(e) => setLocalSmoothing(parseInt(e.target.value, 10))}
+                      onPointerUp={(e) => handleCommitSmoothing(parseInt((e.target as HTMLInputElement).value, 10), activeTargetColor)}
+                      onKeyUp={(e) => {
+                        if (['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown', 'Home', 'End'].includes(e.key)) {
+                          handleCommitSmoothing(localSmoothing, activeTargetColor);
+                        }
+                      }}
+                      className="w-full accent-indigo-600 cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
                       title="Smooth vector cutlines (applies to current selection, or whole layer if all selected)"
                     />
                   </>
@@ -939,7 +971,7 @@ export const VectorInspector: React.FC<VectorInspectorProps> = ({
               }}
               className="py-1 px-1.5 text-[10px] font-bold rounded-lg bg-white hover:bg-indigo-100 text-indigo-700 border border-indigo-200 text-center transition-colors"
             >
-              4-Color Mat
+              4-Color Layer
             </button>
             <button
               type="button"
@@ -967,6 +999,148 @@ export const VectorInspector: React.FC<VectorInspectorProps> = ({
               </button>
             </div>
           )}
+            </div>
+          )}
+        </div>
+
+        {/* OUTER PERIMETER & STICKER OUTLINE CARD */}
+        <div className="bg-cyan-50/60 rounded-2xl border border-cyan-200/80 shadow-2xs overflow-hidden transition-all">
+          <button
+            type="button"
+            onClick={() => setIsPerimeterOpen((prev) => !prev)}
+            className="w-full p-3.5 flex items-center justify-between text-left hover:bg-cyan-100/40 transition-colors cursor-pointer select-none"
+          >
+            <div className="flex items-center gap-2">
+              <span className="p-1 rounded-lg bg-cyan-100/70 text-cyan-700">
+                <Sparkles className="w-4 h-4" />
+              </span>
+              <span className="text-xs font-bold text-cyan-950">Outer Perimeter &amp; Smoothing</span>
+            </div>
+            <div className="flex items-center gap-1.5">
+              {isPerimeterHighlightActive && (
+                <span className="text-[10px] bg-cyan-100 text-cyan-800 border border-cyan-300 px-2 py-0.5 rounded-full font-bold flex items-center gap-1">
+                  <span className="w-1.5 h-1.5 rounded-full bg-cyan-500 animate-pulse" />
+                  <span>Highlighted</span>
+                </span>
+              )}
+              {isPerimeterOpen ? (
+                <ChevronDown className="w-4 h-4 text-cyan-500" />
+              ) : (
+                <ChevronRight className="w-4 h-4 text-cyan-500" />
+              )}
+            </div>
+          </button>
+
+          {isPerimeterOpen && (
+            <div className="p-4 pt-0 border-t border-cyan-200/50 space-y-3.5 animate-in fade-in duration-150">
+              <p className="text-[11px] text-cyan-950/80 leading-relaxed pt-2">
+                Identifies and highlights the outer perimeter of the entire image (as if all layers were flattened into a solid sticker silhouette), with live smoothing and noise reduction for sticker die-cutting.
+              </p>
+
+              {/* 1. Highlight Outer Perimeter Toggle */}
+              <div className="bg-white/80 p-3 rounded-xl border border-cyan-200/70 space-y-2">
+                <div className="flex items-center justify-between">
+                  <div>
+                    <span className="text-xs font-bold text-craft-text">Highlight Outer Perimeter</span>
+                    <p className="text-[10px] text-slate-500">Outer cut contour across all layers</p>
+                  </div>
+                  {onTogglePerimeterHighlight && (
+                    <button
+                      type="button"
+                      onClick={() => onTogglePerimeterHighlight()}
+                      className={`py-1.5 px-3 rounded-xl font-bold text-xs flex items-center gap-1.5 transition-all cursor-pointer ${
+                        isPerimeterHighlightActive
+                          ? 'bg-cyan-600 hover:bg-cyan-700 text-white shadow-xs'
+                          : 'bg-white hover:bg-cyan-50 text-cyan-800 border border-cyan-300'
+                      }`}
+                    >
+                      {isPerimeterHighlightActive ? (
+                        <>
+                          <Eye className="w-3.5 h-3.5" />
+                          <span>Showing</span>
+                        </>
+                      ) : (
+                        <>
+                          <EyeOff className="w-3.5 h-3.5" />
+                          <span>Hidden</span>
+                        </>
+                      )}
+                    </button>
+                  )}
+                </div>
+
+                {/* Highlight Contour Color Swatches */}
+                {isPerimeterHighlightActive && (
+                  <div className="pt-2 border-t border-cyan-100 flex items-center justify-between text-[11px]">
+                    <span className="text-slate-500 font-medium">Contour Color:</span>
+                    <div className="flex items-center gap-1.5">
+                      {[
+                        { name: 'Cyan', color: '#06b6d4' },
+                        { name: 'Pink', color: '#ec4899' },
+                        { name: 'Emerald', color: '#10b981' },
+                        { name: 'Indigo', color: '#6366f1' },
+                        { name: 'Amber', color: '#f59e0b' }
+                      ].map((swatch) => (
+                        <button
+                          key={swatch.color}
+                          type="button"
+                          onClick={() => onChangePerimeterColor && onChangePerimeterColor(swatch.color)}
+                          className={`w-5 h-5 rounded-full border transition-transform cursor-pointer ${
+                            perimeterColor === swatch.color
+                              ? 'scale-125 border-slate-900 ring-2 ring-cyan-400'
+                              : 'border-slate-300 hover:scale-110'
+                          }`}
+                          style={{ backgroundColor: swatch.color }}
+                          title={`${swatch.name} Contour`}
+                        />
+                      ))}
+                    </div>
+                  </div>
+                )}
+              </div>
+
+              {/* 2. Smoothing & Noise Reduction Slider */}
+              {onSmoothOutlines && (
+                <div className="space-y-2">
+                  <div className="flex justify-between items-center text-xs font-medium text-craft-text">
+                    <div className="flex items-center gap-1.5">
+                      <Sparkles className="w-3.5 h-3.5 text-cyan-600" />
+                      <span className="font-bold">Smoothing &amp; Noise Reduction</span>
+                    </div>
+                    <span className="text-cyan-700 font-mono font-bold bg-cyan-100/80 px-2 py-0.5 rounded-md">
+                      {isSmoothing ? 'Applying...' : `${localSmoothing}%`}
+                    </span>
+                  </div>
+
+                  <p className="text-[10px] text-slate-500 leading-tight">
+                    Removes micro-jaggies and jitter from vector edges. Live updates the highlighted outline and each corresponding vector element so changes are baked into your final export.
+                  </p>
+
+                  <input
+                    type="range"
+                    min="0"
+                    max="100"
+                    step="1"
+                    value={localSmoothing}
+                    disabled={isSmoothing}
+                    onChange={(e) => setLocalSmoothing(parseInt(e.target.value, 10))}
+                    onPointerUp={(e) => handleCommitSmoothing(parseInt((e.target as HTMLInputElement).value, 10))}
+                    onKeyUp={(e) => {
+                      if (['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown', 'Home', 'End', 'PageUp', 'PageDown'].includes(e.key)) {
+                        handleCommitSmoothing(localSmoothing);
+                      }
+                    }}
+                    className="w-full accent-cyan-600 cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
+                    title="Smoothing & Noise Reduction for sticker elements and perimeter"
+                  />
+
+                  <div className="flex justify-between text-[10px] text-slate-400 font-mono">
+                    <span>0% (Raw / Crisp)</span>
+                    <span>50% (Smooth Arcs)</span>
+                    <span>100% (Ultra Smooth)</span>
+                  </div>
+                </div>
+              )}
             </div>
           )}
         </div>
@@ -1137,12 +1311,12 @@ export const VectorInspector: React.FC<VectorInspectorProps> = ({
                           <span className="w-2 h-2 rounded-full bg-blue-500" />
                           <span className="w-2 h-2 rounded-full bg-emerald-500" />
                         </span>
-                        <span>Colour (Layer Mats)</span>
+                        <span>Colour (Separate Layers)</span>
                       </button>
                     </div>
                     <p className="text-[10px] text-slate-500 mt-1">
                       {lineArtColorMode === 'color'
-                        ? 'Each layer is outlined in its respective mat/layer colour for multi-color pen drawing.'
+                        ? 'Each layer is outlined in its respective layer colour for multi-color pen drawing.'
                         : 'All paths are drawn with unified crisp black ink outlines.'}
                     </p>
                   </div>

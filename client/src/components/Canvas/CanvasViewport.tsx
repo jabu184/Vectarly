@@ -495,7 +495,7 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
               </div>
               <h3 className="font-extrabold text-sm text-slate-800">Convert Image to Vector Paths</h3>
               <p className="text-xs text-slate-500 mt-1 mb-4 leading-relaxed">
-                Your imported image is loaded! Convert it into clean Cricut cutting mats and vector layers.
+                Your imported image is loaded! Convert it into clean Cricut cutting layers and vector artwork.
               </p>
               <button
                 type="button"

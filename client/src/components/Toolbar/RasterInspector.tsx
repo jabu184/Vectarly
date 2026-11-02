@@ -53,7 +53,7 @@ export const RasterInspector: React.FC<RasterInspectorProps> = ({
   const [filterSpeckle, setFilterSpeckle] = useState<number>(4);
   const [colorPrecision, setColorPrecision] = useState<number>(7);
   const [maxColors] = useState<number>(12);
-  const [simplify] = useState<number>(1.5);
+  const [simplify, setSimplify] = useState<number>(1.5);
 
   // Nestable / Collapsible RHS Cards: default nested (collapsed)
   const [isBgStripperOpen, setIsBgStripperOpen] = useState<boolean>(false);
@@ -284,10 +284,32 @@ export const RasterInspector: React.FC<RasterInspectorProps> = ({
                 />
               </div>
 
+              {/* Curve Simplification Slider */}
+              <div>
+                <div className="flex justify-between text-xs font-medium text-craft-text mb-1">
+                  <span>Curve Simplification</span>
+                  <span className="text-indigo-600 font-mono font-bold">{simplify}</span>
+                </div>
+                <input
+                  type="range"
+                  min="0"
+                  max="10"
+                  step="0.5"
+                  value={simplify}
+                  onChange={(e) => setSimplify(parseFloat(e.target.value))}
+                  className="w-full accent-indigo-600 cursor-pointer"
+                />
+                <div className="flex justify-between text-[10px] text-slate-400 font-mono mt-0.5">
+                  <span>0 (Ultra-sharp)</span>
+                  <span>5 (Smooth)</span>
+                  <span>10 (Minimal)</span>
+                </div>
+              </div>
+
               {/* Color Precision Slider */}
               <div>
                 <div className="flex justify-between text-xs font-medium text-craft-text mb-1">
-                  <span>Color Precision (Vinyl Mats)</span>
+                  <span>Color Precision (Vinyl Layers)</span>
                   <span className="text-indigo-600 font-mono font-bold">{colorPrecision} / 10</span>
                 </div>
                 <input

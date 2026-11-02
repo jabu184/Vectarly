@@ -27,6 +27,7 @@ import {
   type VinylCutSettings,
   getStoredVinylSettings
 } from '../services/vinylCutSettings';
+import type { FlattenMode } from '../services/booleanUnion';
 
 export interface ExportModalProps {
   isOpen: boolean;
@@ -34,6 +35,8 @@ export interface ExportModalProps {
   onExportSvg: (options?: {
     isLineArt?: boolean;
     groupColorsIntoMats?: boolean;
+    flattenMode?: FlattenMode;
+    includePerimeterCutLine?: boolean;
     penInfill?: PenInfillOptions;
     vinylRemediation?: {
       enabled: boolean;
@@ -45,6 +48,7 @@ export interface ExportModalProps {
   isLineArtActive?: boolean;
   matsCount?: number;
   vinylSettings?: VinylCutSettings;
+  activeFlattenMode?: FlattenMode;
 }
 
 export type ExportFormat = 'cricut-svg' | 'pen-draw' | 'png' | 'pdf';
@@ -57,9 +61,17 @@ export const ExportModal: React.FC<ExportModalProps> = ({
   onExportPdf,
   isLineArtActive = false,
   matsCount = 1,
-  vinylSettings: propVinylSettings
+  vinylSettings: propVinylSettings,
+  activeFlattenMode
 }) => {
   const [selectedFormat, setSelectedFormat] = useState<ExportFormat>('cricut-svg');
+  const [selectedLayerStyle, setSelectedLayerStyle] = useState<FlattenMode>(activeFlattenMode || 'stacked');
+
+  React.useEffect(() => {
+    if (activeFlattenMode) {
+      setSelectedLayerStyle(activeFlattenMode);
+    }
+  }, [activeFlattenMode, isOpen]);
 
   // Vinyl Optimization State
   const [remediateVinyl, setRemediateVinyl] = useState<boolean>(true);
@@ -72,6 +84,7 @@ export const ExportModal: React.FC<ExportModalProps> = ({
   const [overlapFactor, setOverlapFactor] = useState<number>(0.92);
   const [showAdvancedOverlap, setShowAdvancedOverlap] = useState<boolean>(false);
   const [separateColorsByMat, setSeparateColorsByMat] = useState<boolean>(true);
+  const [includePerimeterCutLine, setIncludePerimeterCutLine] = useState<boolean>(false);
 
   if (!isOpen) return null;
 
@@ -86,6 +99,8 @@ export const ExportModal: React.FC<ExportModalProps> = ({
       onExportSvg({
         isLineArt: false,
         groupColorsIntoMats: true,
+        flattenMode: selectedLayerStyle,
+        includePerimeterCutLine,
         vinylRemediation: {
           enabled: remediateVinyl,
           settings: activeVinylSettings
@@ -179,7 +194,7 @@ export const ExportModal: React.FC<ExportModalProps> = ({
                     </span>
                   </div>
                   <p className="text-[10px] text-slate-500 mt-0.5">
-                    Separated into {matsCount} cutting mats
+                    Separated into {matsCount} cutting layers
                   </p>
                 </div>
               </button>
@@ -265,6 +280,55 @@ export const ExportModal: React.FC<ExportModalProps> = ({
             </div>
           </div>
 
+          {/* Vinyl Layering Style Selector (Solid Stacked vs Knockout Inlay) */}
+          {selectedFormat === 'cricut-svg' && (
+            <div className="bg-slate-50 border border-slate-200/90 rounded-2xl p-4 space-y-2.5 animate-in fade-in">
+              <div className="flex items-center justify-between">
+                <span className="font-bold text-xs text-slate-800 flex items-center gap-1.5">
+                  <Layers className="w-3.5 h-3.5 text-indigo-600" />
+                  <span>Vinyl Layering Style</span>
+                </span>
+                <span className="text-[10px] bg-indigo-100 text-indigo-800 font-bold px-2 py-0.5 rounded-full">
+                  {selectedLayerStyle === 'stacked' ? 'Solid Stacked (Layered)' : 'Knockout (Jigsaw Inlay)'}
+                </span>
+              </div>
+              <div className="grid grid-cols-2 gap-2 pt-0.5">
+                <button
+                  type="button"
+                  onClick={() => setSelectedLayerStyle('stacked')}
+                  className={`p-3 rounded-xl text-left border text-xs transition-all cursor-pointer ${
+                    selectedLayerStyle === 'stacked'
+                      ? 'bg-white border-indigo-600 text-indigo-950 shadow-xs ring-1 ring-indigo-300'
+                      : 'bg-white/60 border-slate-200 text-slate-500 hover:bg-white'
+                  }`}
+                >
+                  <p className="font-bold flex items-center gap-1.5">
+                    <span>Solid Stacked</span>
+                    <span className="text-[9px] bg-emerald-100 text-emerald-800 font-bold px-1 rounded">Recommended</span>
+                  </p>
+                  <p className="text-[10px] text-slate-500 mt-0.5">
+                    Base layers are solid silhouettes underneath upper layers. Ideal for layering vinyl with no gaps.
+                  </p>
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() => setSelectedLayerStyle('knockout')}
+                  className={`p-3 rounded-xl text-left border text-xs transition-all cursor-pointer ${
+                    selectedLayerStyle === 'knockout'
+                      ? 'bg-white border-indigo-600 text-indigo-950 shadow-xs ring-1 ring-indigo-300'
+                      : 'bg-white/60 border-slate-200 text-slate-500 hover:bg-white'
+                  }`}
+                >
+                  <p className="font-bold">Knockout Inlay</p>
+                  <p className="text-[10px] text-slate-500 mt-0.5">
+                    Non-overlapping jigsaw pieces. Every piece fits together on a single flat layer.
+                  </p>
+                </button>
+              </div>
+            </div>
+          )}
+
           {/* Vinyl Cutting Detail Validation & Remediation Options */}
           {selectedFormat === 'cricut-svg' && (
             <div className="bg-indigo-50/70 border border-indigo-200/80 rounded-2xl p-4 space-y-3 animate-in fade-in">
@@ -324,6 +388,37 @@ export const ExportModal: React.FC<ExportModalProps> = ({
             </div>
           )}
 
+          {/* Optional Sticker Outer Perimeter Cut Contour Layer */}
+          {selectedFormat === 'cricut-svg' && (
+            <div className="bg-cyan-50/70 border border-cyan-200/80 rounded-2xl p-3.5 space-y-1.5 text-xs animate-in fade-in">
+              <div className="flex items-center justify-between">
+                <div className="flex items-center gap-2">
+                  <div className="p-1 rounded-lg bg-cyan-100 text-cyan-700">
+                    <Sparkles className="w-3.5 h-3.5" />
+                  </div>
+                  <div>
+                    <label
+                      htmlFor="includePerimeterCutLine"
+                      className="font-bold text-cyan-950 cursor-pointer select-none"
+                    >
+                      Include Sticker Die-Cut Contour
+                    </label>
+                    <p className="text-[10px] text-cyan-800/80">
+                      Adds an extra outer perimeter cut layer for stickers (kiss-cut / die-cut border)
+                    </p>
+                  </div>
+                </div>
+                <input
+                  id="includePerimeterCutLine"
+                  type="checkbox"
+                  checked={includePerimeterCutLine}
+                  onChange={(e) => setIncludePerimeterCutLine(e.target.checked)}
+                  className="w-4 h-4 rounded text-cyan-600 focus:ring-cyan-500 cursor-pointer accent-cyan-600"
+                />
+              </div>
+            </div>
+          )}
+
           {/* Pen Color Layer Mode (Multi-Color Pens vs Single Black Layer) */}
           {selectedFormat === 'pen-draw' && (
             <div className="bg-amber-50/70 border border-amber-200/80 rounded-2xl p-3.5 space-y-2 text-xs animate-in fade-in">
@@ -347,7 +442,7 @@ export const ExportModal: React.FC<ExportModalProps> = ({
                   }`}
                 >
                   <p className="font-bold">Multi-Color Pens</p>
-                  <p className="text-[10px] text-slate-500 mt-0.5">1 layer for each color ({matsCount} mats)</p>
+                  <p className="text-[10px] text-slate-500 mt-0.5">1 layer for each color ({matsCount} layers)</p>
                 </button>
                 <button
                   type="button"

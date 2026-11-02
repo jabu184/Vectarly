@@ -49,7 +49,7 @@ export const FlattenModal: React.FC<FlattenModalProps> = ({
               <Layers className="w-5 h-5" />
             </div>
             <div>
-              <h3 className="font-extrabold text-slate-900 text-lg tracking-tight">Flatten Artwork &amp; Color Mats</h3>
+              <h3 className="font-extrabold text-slate-900 text-lg tracking-tight">Flatten Artwork &amp; Color Layers</h3>
               <p className="text-xs text-slate-500 font-medium">
                 Choose how overlapping color layers are cut and assembled for your vinyl plotter
               </p>
@@ -175,7 +175,7 @@ export const FlattenModal: React.FC<FlattenModalProps> = ({
                 <div>
                   <h4 className="font-bold text-slate-900 text-sm">Solid Stacked (Overlapping)</h4>
                   <p className="text-xs text-slate-600 mt-1 leading-relaxed">
-                    Where upper layers overlay, the layer below is <strong className="text-slate-800">made solid in that area</strong> (fills cutouts and creates solid bases). Matches your Active Mats order.
+                    Where upper layers overlay, the layer below is <strong className="text-slate-800">made solid in that area</strong> (fills cutouts and creates solid bases). Matches your Active Layers order.
                   </p>
                 </div>
 
@@ -222,7 +222,7 @@ export const FlattenModal: React.FC<FlattenModalProps> = ({
           <div className="flex items-center gap-2.5 p-3 rounded-xl bg-slate-50 border border-slate-200/80 text-xs text-slate-600">
             <Info className="w-4 h-4 text-indigo-600 shrink-0" />
             <span>
-              Both styles unite vectors of the same color into compound mats. You can undo anytime with{' '}
+              Both styles unite vectors of the same color into compound layers. You can undo anytime with{' '}
               <kbd className="px-1.5 py-0.5 rounded bg-white border border-slate-300 text-[10px] font-mono font-bold text-slate-700 shadow-xs">
                 Ctrl+Z
               </kbd>

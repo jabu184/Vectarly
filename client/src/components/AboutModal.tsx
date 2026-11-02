@@ -45,7 +45,7 @@ export const AboutModal: React.FC<AboutModalProps> = ({ isOpen, onClose }) => {
           />
           <div className="flex items-center gap-2 mt-3">
             <span className="px-2.5 py-0.5 rounded-full text-[11px] font-extrabold bg-indigo-50 text-indigo-700 border border-indigo-200">
-              Version 1.11
+              Version 1.12
             </span>
             <span className="px-2.5 py-0.5 rounded-full text-[11px] font-bold bg-emerald-50 text-emerald-700 border border-emerald-200 flex items-center gap-1">
               <CheckCircle2 className="w-3 h-3 text-emerald-600" />
@@ -63,7 +63,7 @@ export const AboutModal: React.FC<AboutModalProps> = ({ isOpen, onClose }) => {
             <span>Author: James Burnley</span>
           </div>
           <p className="text-slate-500 leading-relaxed text-[11px]">
-            AI Vectorization, live SVG path clustering, multi-layer vinyl mat separation, and physical weed checks built for professional crafters and makers.
+            AI Vectorization, live SVG path clustering, multi-layer vinyl layer separation, and physical weed checks built for professional crafters and makers.
           </p>
         </div>
 
@@ -79,7 +79,7 @@ export const AboutModal: React.FC<AboutModalProps> = ({ isOpen, onClose }) => {
           <div className="p-2.5 rounded-xl bg-slate-50 border border-slate-100 space-y-1">
             <p className="font-bold text-slate-700 flex items-center gap-1.5 text-[11px]">
               <Layers className="w-3.5 h-3.5 text-pink-600" />
-              <span>Mat Clustering</span>
+              <span>Layer Clustering</span>
             </p>
             <p className="text-[10px] text-slate-500">Color simplify and assign custom vinyl brand palettes.</p>
           </div>

@@ -29,7 +29,14 @@ import {
   getStoredVinylSettings
 } from './vinylCutSettings';
 import { remediateSvgPath } from './vinylRemediation';
-import { booleanUnionPaths, flattenColorLayersNonOverlapping } from './booleanUnion';
+import {
+  booleanUnionPaths,
+  flattenColorLayers,
+  commandsToContours,
+  type FlattenMode,
+  type FlattenColorGroup,
+  computeOuterPerimeterD
+} from './booleanUnion';
 
 export interface CricutExportOptions {
   isLineArt?: boolean;
@@ -38,6 +45,10 @@ export interface CricutExportOptions {
     colorMode?: 'black' | 'color';
   };
   groupColorsIntoMats?: boolean;
+  flattenMode?: FlattenMode;
+  isCanvasAlreadyFlattened?: boolean;
+  includePerimeterCutLine?: boolean;
+  orderedColors?: string[];
   penInfill?: PenInfillOptions;
   vinylRemediation?: {
     enabled: boolean;
@@ -389,15 +400,25 @@ export function exportCricutSvg(
     } else {
       // Multi-Mat Mode:
       // For EACH colour group combine all individual path strings into a SINGLE element (a compound path)
-      // and guarantee zero overlap between mats (inlay cutout geometry).
+      // respecting the chosen layering mode: 'stacked' (solid base silhouettes) or 'knockout' (jigsaw inlays).
       let matIndex = 1;
 
       if (!isPenMode && !isLineArt) {
         // Collect all color groups and their canvas z-index
-        const colorGroups: { color: string; pathStrings: string[]; maxZ: number }[] = [];
+        const colorGroupsMap = new Map<
+          string,
+          {
+            pathStrings: string[];
+            contoursList: { x: number; y: number }[][][];
+            maxZ: number;
+          }
+        >();
+
         colorObjectsMap.forEach((objects, colorKey) => {
           const pathStringsForThisColor: string[] = [];
+          const contoursListForThisColor: { x: number; y: number }[][][] = [];
           let maxZ = 0;
+
           objects.forEach((obj) => {
             const z = canvas.getObjects().indexOf(obj);
             if (z > maxZ) maxZ = z;
@@ -417,20 +438,59 @@ export function exportCricutSvg(
               if (!shapeD) return;
             }
             pathStringsForThisColor.push(shapeD);
+
+            const contours = commandsToContours(cmds);
+            if (contours.length > 0) {
+              contoursListForThisColor.push(contours);
+            }
           });
 
           if (pathStringsForThisColor.length > 0) {
-            colorGroups.push({ color: colorKey, pathStrings: pathStringsForThisColor, maxZ });
+            colorGroupsMap.set(colorKey, {
+              pathStrings: pathStringsForThisColor,
+              contoursList: contoursListForThisColor,
+              maxZ
+            });
           }
         });
 
-        // Sort front-to-back so foreground details take precedence
-        colorGroups.sort((a, b) => b.maxZ - a.maxZ);
+        // Determine layer order: top (foreground, index 0) to bottom (base background, last index)
+        const explicitOrder = (options.orderedColors || []).map((c) => c.trim().toUpperCase());
 
-        // Compute completely non-overlapping geometry
-        const flattenedMats = flattenColorLayersNonOverlapping(colorGroups);
+        const sortedGroups: FlattenColorGroup[] = Array.from(colorGroupsMap.entries())
+          .sort(([colorA, dataA], [colorB, dataB]) => {
+            const normA = colorA.toUpperCase();
+            const normB = colorB.toUpperCase();
+            const idxA = explicitOrder.indexOf(normA);
+            const idxB = explicitOrder.indexOf(normB);
+            if (idxA !== -1 && idxB !== -1) {
+              return idxA - idxB;
+            }
+            if (idxA !== -1) return -1;
+            if (idxB !== -1) return 1;
+            // Fallback: maxZ descending (higher z on canvas is top/foreground)
+            return dataB.maxZ - dataA.maxZ;
+          })
+          .map(([color, data]) => ({
+            color,
+            pathStrings: data.pathStrings,
+            contoursList: data.contoursList
+          }));
 
-        flattenedMats.forEach((mat) => {
+        // Compute layer geometry based on selected flattenMode ('stacked' preserves solid base silhouettes, 'knockout' cuts jigsaw inlays)
+        const effectiveFlattenMode: FlattenMode = options.flattenMode || 'knockout';
+        // Fast path: if the canvas has already been flattened in this mode, each color group is already a single unified compound path!
+        const isAlreadyFlattened =
+          Boolean(options.isCanvasAlreadyFlattened) && sortedGroups.every((g) => g.pathStrings.length === 1);
+        const flattenedMats = isAlreadyFlattened
+          ? sortedGroups.map((g) => ({ color: g.color, d: g.pathStrings[0] }))
+          : flattenColorLayers(sortedGroups, effectiveFlattenMode);
+
+        // In SVG DOM, back-to-front order (background base mat first, foreground detail mats on top)
+        // ensures that in standard SVG viewers and Cricut Design Space the base silhouette renders behind upper layers!
+        const matsToAdd = [...flattenedMats].reverse();
+
+        matsToAdd.forEach((mat) => {
           const matPath = cricutDoc.createElementNS('http://www.w3.org/2000/svg', 'path');
           matPath.setAttribute('id', `Mat_${matIndex}_Path`);
           matPath.setAttribute('d', mat.d);
@@ -447,6 +507,38 @@ export function exportCricutSvg(
           masterContainer.appendChild(matGroup);
           matIndex++;
         });
+
+        // Optional Sticker Die-Cut Contour Mat (Outer Perimeter)
+        if (options.includePerimeterCutLine) {
+          const allDStrings: string[] = [];
+          colorObjectsMap.forEach((objects) => {
+            objects.forEach((obj) => {
+              const cmds = extractAbsoluteCommands(obj);
+              if (cmds.length > 0) {
+                const shapeD = commandsToD(cmds).trim();
+                if (shapeD) allDStrings.push(shapeD);
+              }
+            });
+          });
+
+          const perimeterD = computeOuterPerimeterD(allDStrings);
+          if (perimeterD && perimeterD.trim()) {
+            const perimeterPath = cricutDoc.createElementNS('http://www.w3.org/2000/svg', 'path');
+            perimeterPath.setAttribute('id', `Mat_${matIndex}_Sticker_Die_Cut_Contour`);
+            perimeterPath.setAttribute('d', perimeterD);
+            perimeterPath.setAttribute('fill', 'none');
+            perimeterPath.setAttribute('stroke', '#000000');
+            perimeterPath.setAttribute('stroke-width', '2');
+            perimeterPath.setAttribute('data-type', 'cricut-cut-mat');
+
+            const perimeterGroup = cricutDoc.createElementNS('http://www.w3.org/2000/svg', 'g');
+            perimeterGroup.setAttribute('id', `Mat_${matIndex}_Sticker_Die_Cut_Contour`);
+            perimeterGroup.setAttribute('fill', 'none');
+            perimeterGroup.appendChild(perimeterPath);
+            masterContainer.appendChild(perimeterGroup);
+            matIndex++;
+          }
+        }
       } else {
         // Pen Draw or Line Art mode
         colorObjectsMap.forEach((objects, colorKey) => {
@@ -510,6 +602,38 @@ export function exportCricutSvg(
           masterContainer.appendChild(matGroup);
           matIndex++;
         });
+
+        // Optional Sticker Die-Cut Contour Mat (Outer Perimeter)
+        if (options.includePerimeterCutLine) {
+          const allDStrings: string[] = [];
+          colorObjectsMap.forEach((objects) => {
+            objects.forEach((obj) => {
+              const cmds = extractAbsoluteCommands(obj);
+              if (cmds.length > 0) {
+                const shapeD = commandsToD(cmds).trim();
+                if (shapeD) allDStrings.push(shapeD);
+              }
+            });
+          });
+
+          const perimeterD = computeOuterPerimeterD(allDStrings);
+          if (perimeterD && perimeterD.trim()) {
+            const perimeterPath = cricutDoc.createElementNS('http://www.w3.org/2000/svg', 'path');
+            perimeterPath.setAttribute('id', `Mat_${matIndex}_Sticker_Die_Cut_Contour`);
+            perimeterPath.setAttribute('d', perimeterD);
+            perimeterPath.setAttribute('fill', 'none');
+            perimeterPath.setAttribute('stroke', '#000000');
+            perimeterPath.setAttribute('stroke-width', '2');
+            perimeterPath.setAttribute('data-type', 'cricut-cut-mat');
+
+            const perimeterGroup = cricutDoc.createElementNS('http://www.w3.org/2000/svg', 'g');
+            perimeterGroup.setAttribute('id', `Mat_${matIndex}_Sticker_Die_Cut_Contour`);
+            perimeterGroup.setAttribute('fill', 'none');
+            perimeterGroup.appendChild(perimeterPath);
+            masterContainer.appendChild(perimeterGroup);
+            matIndex++;
+          }
+        }
       }
     }
 

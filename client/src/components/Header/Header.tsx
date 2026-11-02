@@ -36,6 +36,7 @@ interface HeaderProps {
   onSelectSample: (sampleKey: string) => void;
   onSaveProject?: () => void;
   onOpenProject?: () => void;
+  isDirty?: boolean;
   stats?: {
     pathCount: number;
     colorCount: number;
@@ -59,6 +60,7 @@ export const Header: React.FC<HeaderProps> = ({
   onSelectSample,
   onSaveProject,
   onOpenProject,
+  isDirty = false,
   stats
 }) => {
   const [exportOpen, setExportOpen] = useState(false);
@@ -82,7 +84,7 @@ export const Header: React.FC<HeaderProps> = ({
           type="button"
           onClick={onOpenAbout}
           className="flex items-center gap-2 group cursor-pointer border-none bg-transparent p-0 transition-transform hover:scale-[1.02] active:scale-95"
-          title="About Vectarly (v1.11)"
+          title="About Vectarly (v1.12)"
         >
           <img
             src="/vectarly-logo.png"
@@ -166,6 +168,9 @@ export const Header: React.FC<HeaderProps> = ({
           >
             <Save className="w-3.5 h-3.5 text-emerald-600" />
             <span className="hidden sm:inline">Save</span>
+            {isDirty && (
+              <span className="w-1.5 h-1.5 rounded-full bg-amber-500 animate-pulse ml-0.5" title="Unsaved changes" />
+            )}
           </button>
         </div>
 
@@ -318,7 +323,7 @@ export const Header: React.FC<HeaderProps> = ({
                     <span>Cricut SVG Vector</span>
                     <span className="text-[9px] bg-emerald-100 text-emerald-800 font-semibold px-1.5 py-0.2 rounded">Recommended</span>
                   </div>
-                  <p className="text-[11px] text-craft-muted">Cutout seam layers ready for Design Space mats</p>
+                  <p className="text-[11px] text-craft-muted">Cutout seam layers ready for Design Space layers</p>
                 </div>
               </button>
 

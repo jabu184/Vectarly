@@ -211,19 +211,89 @@ export function booleanUnionPaths(pathStrings: string[]): string {
   return validDStrings.join(' ');
 }
 
+function batchUnion(multiPolys: number[][][][][]): number[][][][] {
+  if (multiPolys.length === 0) return [];
+  if (multiPolys.length === 1) return multiPolys[0];
+
+  // Batch union in a single sweep-line operation for ultra-fast performance
+  if (multiPolys.length <= 250) {
+    try {
+      return (polygonClipping as any).union(multiPolys[0], ...multiPolys.slice(1));
+    } catch {
+      // Fallback to chunked union below
+    }
+  }
+
+  let current = multiPolys[0];
+  const chunkSize = 100;
+  for (let i = 1; i < multiPolys.length; i += chunkSize) {
+    const chunk = multiPolys.slice(i, i + chunkSize);
+    try {
+      current = (polygonClipping as any).union(current, ...chunk);
+    } catch {
+      for (const item of chunk) {
+        try {
+          current = (polygonClipping as any).union(current, item);
+        } catch {
+          current.push(...item);
+        }
+      }
+    }
+  }
+  return current;
+}
+
+function getPolygonBBox(poly: number[][][]): [number, number, number, number] {
+  let minX = Infinity;
+  let minY = Infinity;
+  let maxX = -Infinity;
+  let maxY = -Infinity;
+  const outer = poly[0];
+  if (!outer || outer.length === 0) return [0, 0, 0, 0];
+  for (let i = 0; i < outer.length; i++) {
+    const pt = outer[i];
+    if (pt[0] < minX) minX = pt[0];
+    if (pt[0] > maxX) maxX = pt[0];
+    if (pt[1] < minY) minY = pt[1];
+    if (pt[1] > maxY) maxY = pt[1];
+  }
+  return [minX, minY, maxX, maxY];
+}
+
+function getMultiPolyBBox(multiPoly: number[][][][]): [number, number, number, number] {
+  let minX = Infinity;
+  let minY = Infinity;
+  let maxX = -Infinity;
+  let maxY = -Infinity;
+  for (const poly of multiPoly) {
+    const b = getPolygonBBox(poly);
+    if (b[0] < minX) minX = b[0];
+    if (b[1] < minY) minY = b[1];
+    if (b[2] > maxX) maxX = b[2];
+    if (b[3] > maxY) maxY = b[3];
+  }
+  return [minX, minY, maxX, maxY];
+}
+
+function bboxesIntersect(
+  b1: [number, number, number, number],
+  b2: [number, number, number, number]
+): boolean {
+  return !(b2[0] > b1[2] || b2[2] < b1[0] || b2[1] > b1[3] || b2[3] < b1[1]);
+}
+
 /**
  * Converts a set of SVG path strings into a 2D MultiPolygon geometry.
  * Correctly accounts for SVG fill-rule: evenodd holes within each path via XOR,
- * and unions shapes of the same color.
+ * and batch-unions shapes of the same color in a single sweep-line pass.
  */
 export function pathsToMultiPolygon(
   pathStrings: string[],
   contoursList?: { x: number; y: number }[][][]
 ): number[][][][] {
-  let accumulatedMultiPoly: number[][][][] = [];
-
   // 1. Process contoursList directly if available
   if (contoursList && contoursList.length > 0) {
+    const allPathGeoms: number[][][][][] = [];
     for (const contours of contoursList) {
       if (!contours || contours.length === 0) continue;
       let pathGeom: number[][][][] = [];
@@ -244,24 +314,17 @@ export function pathsToMultiPolygon(
         }
       }
       if (pathGeom.length > 0) {
-        if (accumulatedMultiPoly.length === 0) {
-          accumulatedMultiPoly = pathGeom;
-        } else {
-          try {
-            accumulatedMultiPoly = (polygonClipping as any).union(accumulatedMultiPoly, pathGeom);
-          } catch {
-            accumulatedMultiPoly.push(...pathGeom);
-          }
-        }
+        allPathGeoms.push(pathGeom);
       }
     }
-    return accumulatedMultiPoly;
+    return batchUnion(allPathGeoms);
   }
 
   // 2. Otherwise parse pathStrings
   const validDStrings = pathStrings.filter((d) => d && d.trim().length > 0);
   if (validDStrings.length === 0) return [];
 
+  const allPathGeoms: number[][][][][] = [];
   for (const d of validDStrings) {
     try {
       const contours = parseSvgPathToContours(d);
@@ -286,22 +349,14 @@ export function pathsToMultiPolygon(
       }
 
       if (pathGeom.length > 0) {
-        if (accumulatedMultiPoly.length === 0) {
-          accumulatedMultiPoly = pathGeom;
-        } else {
-          try {
-            accumulatedMultiPoly = (polygonClipping as any).union(accumulatedMultiPoly, pathGeom);
-          } catch {
-            accumulatedMultiPoly.push(...pathGeom);
-          }
-        }
+        allPathGeoms.push(pathGeom);
       }
     } catch (err) {
       console.warn('[BooleanUnion] Failed to convert path to polygon:', err);
     }
   }
 
-  return accumulatedMultiPoly;
+  return batchUnion(allPathGeoms);
 }
 
 export interface FlattenColorGroup {
@@ -321,6 +376,7 @@ export type FlattenMode = 'knockout' | 'stacked';
  * Ensures that where any upper layer overlays a lower layer,
  * the lower layer is solid in that area (fills cutouts and interior holes
  * covered by upper layers, creating solid background bases).
+ * Optimized with bounding-box pre-filtering and batch boolean operations.
  */
 export function makeLayerSolidUnderOverlays(
   layerMultiPoly: number[][][][],
@@ -331,34 +387,80 @@ export function makeLayerSolidUnderOverlays(
 
   let currentLayer = layerMultiPoly;
 
-  // 1. For each polygon in currentLayer, fill interior cutouts / holes covered by upper layers
-  for (const poly of currentLayer) {
-    if (!poly || poly.length === 0 || !poly[0] || poly[0].length < 3) continue;
-    const extRing = poly[0];
-    const envelope: number[][][][] = [[extRing]];
+  // 1. Fill interior cutouts / holes covered by upper layers:
+  // An interior hole only exists if poly has more than 1 ring (poly[0] is outer boundary, poly[1...] are holes).
+  const polysWithHoles = currentLayer.filter(
+    (poly) => poly && poly.length > 1 && poly[0] && poly[0].length >= 3
+  );
+
+  if (polysWithHoles.length > 0) {
+    const upperBBox = getMultiPolyBBox(upperMultiPoly);
+    const candidateEnvelopes: number[][][][] = [];
+
+    for (const poly of polysWithHoles) {
+      const pBBox = getPolygonBBox(poly);
+      if (bboxesIntersect(pBBox, upperBBox)) {
+        candidateEnvelopes.push([poly[0]]);
+      }
+    }
+
+    if (candidateEnvelopes.length > 0) {
+      try {
+        const overlay = (polygonClipping as any).intersection(
+          upperMultiPoly,
+          candidateEnvelopes.length === 1 ? candidateEnvelopes[0] : candidateEnvelopes
+        );
+        if (overlay && overlay.length > 0) {
+          currentLayer = (polygonClipping as any).union(currentLayer, overlay);
+        }
+      } catch {
+        for (const env of candidateEnvelopes) {
+          try {
+            const overlay = (polygonClipping as any).intersection(upperMultiPoly, env);
+            if (overlay && overlay.length > 0) {
+              currentLayer = (polygonClipping as any).union(currentLayer, overlay);
+            }
+          } catch {
+            // Continue
+          }
+        }
+      }
+    }
+  }
+
+  // 2. Incorporate upper layer polygons that overlay or touch this layer (solid stacked / overprint)
+  const currentBBox = getMultiPolyBBox(currentLayer);
+  const touchingUpperPolys: number[][][][] = [];
+
+  for (const upperPoly of upperMultiPoly) {
+    if (!upperPoly || upperPoly.length === 0 || !upperPoly[0] || upperPoly[0].length < 3) continue;
+    const uBBox = getPolygonBBox(upperPoly);
+    if (!bboxesIntersect(currentBBox, uBBox)) continue;
 
     try {
-      const overlay = (polygonClipping as any).intersection(upperMultiPoly, envelope);
-      if (overlay && overlay.length > 0) {
-        currentLayer = (polygonClipping as any).union(currentLayer, overlay);
+      const inter = (polygonClipping as any).intersection(currentLayer, [upperPoly]);
+      if (inter && inter.length > 0) {
+        touchingUpperPolys.push(upperPoly);
       }
     } catch {
       // Continue
     }
   }
 
-  // 2. Also incorporate upper layer polygons that overlay or touch this layer (solid stacked / overprint)
-  for (const upperPoly of upperMultiPoly) {
-    if (!upperPoly || upperPoly.length === 0 || !upperPoly[0] || upperPoly[0].length < 3) continue;
-    const uMulti: number[][][][] = [upperPoly];
+  if (touchingUpperPolys.length > 0) {
     try {
-      const testUnion = (polygonClipping as any).union(currentLayer, uMulti);
-      // If the union merges (number of polygons doesn't increase by 1), it touches/stacks!
-      if (testUnion && testUnion.length <= currentLayer.length) {
-        currentLayer = testUnion;
-      }
+      currentLayer = (polygonClipping as any).union(currentLayer, touchingUpperPolys);
     } catch {
-      // Continue
+      for (const upperPoly of touchingUpperPolys) {
+        try {
+          const testUnion = (polygonClipping as any).union(currentLayer, [upperPoly]);
+          if (testUnion && testUnion.length <= currentLayer.length) {
+            currentLayer = testUnion;
+          }
+        } catch {
+          // Continue
+        }
+      }
     }
   }
 
@@ -480,5 +582,36 @@ export function flattenColorLayersNonOverlapping(
   colorGroups: FlattenColorGroup[]
 ): FlattenResultLayer[] {
   return flattenColorLayers(colorGroups, 'knockout');
+}
+
+/**
+ * Calculates the exact outer perimeter boundary SVG path `d`
+ * across all provided vector path strings (as if all layers were flattened into a single image).
+ * Strips away all interior cutout holes and internal layer seams, leaving only the outer perimeter contour.
+ */
+export function computeOuterPerimeterD(pathStrings: string[]): string {
+  const validDStrings = pathStrings.filter((d) => d && d.trim().length > 0);
+  if (validDStrings.length === 0) return '';
+
+  try {
+    const multiPoly = pathsToMultiPolygon(validDStrings);
+    if (!multiPoly || multiPoly.length === 0) {
+      return '';
+    }
+
+    // Outer perimeter boundary keeps ONLY the outer ring (poly[0]) of each polygon island
+    const outerBoundaryMultiPoly: number[][][][] = multiPoly
+      .filter((poly) => poly && poly.length > 0 && poly[0] && poly[0].length >= 3)
+      .map((poly) => [poly[0]]);
+
+    if (outerBoundaryMultiPoly.length === 0) {
+      return '';
+    }
+
+    return multiPolygonToSvgD(outerBoundaryMultiPoly);
+  } catch (err) {
+    console.warn('[BooleanUnion] Failed to compute outer perimeter:', err);
+    return '';
+  }
 }
 

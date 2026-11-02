@@ -181,11 +181,43 @@ export const CanvasContextMenu: React.FC<CanvasContextMenuProps> = ({
     onChangeColor?.(norm);
   };
 
-  if (!menuState.isOpen) return null;
+  // Dynamic layout positioning to guarantee the menu never overflows the viewport
+  const [menuPos, setMenuPos] = useState<{ x: number; y: number }>({
+    x: Math.max(10, Math.min(menuState.x, typeof window !== 'undefined' ? window.innerWidth - 240 : 10)),
+    y: Math.max(10, Math.min(menuState.y, typeof window !== 'undefined' ? window.innerHeight - 560 : 10))
+  });
 
-  // Prevent context menu from overflowing the screen boundaries
-  const adjustedX = Math.max(10, Math.min(menuState.x, window.innerWidth - 240));
-  const adjustedY = Math.max(10, Math.min(menuState.y, window.innerHeight - 420));
+  useEffect(() => {
+    if (!menuState.isOpen) return;
+
+    const clampPosition = () => {
+      const padding = 12;
+      const el = menuRef.current;
+      const menuWidth = el ? el.offsetWidth : 240;
+      const menuHeight = el ? el.offsetHeight : 540;
+
+      let x = menuState.x;
+      if (x + menuWidth > window.innerWidth - padding) {
+        x = Math.max(padding, window.innerWidth - menuWidth - padding);
+      }
+      if (x < padding) x = padding;
+
+      // Ensure the bottom of the menu does not go beyond the bottom of the current view
+      let y = menuState.y;
+      if (y + menuHeight > window.innerHeight - padding) {
+        y = Math.max(padding, window.innerHeight - menuHeight - padding);
+      }
+      if (y < padding) y = padding;
+
+      setMenuPos({ x, y });
+    };
+
+    clampPosition();
+    const frameId = requestAnimationFrame(clampPosition);
+    return () => cancelAnimationFrame(frameId);
+  }, [menuState.isOpen, menuState.x, menuState.y, targetObj]);
+
+  if (!menuState.isOpen) return null;
 
   // If right-clicked anywhere on the grid view without an active element selection
   if (!targetObj) {
@@ -194,8 +226,10 @@ export const CanvasContextMenu: React.FC<CanvasContextMenuProps> = ({
         ref={menuRef}
         style={{
           position: 'fixed',
-          left: `${adjustedX}px`,
-          top: `${adjustedY}px`,
+          left: `${menuPos.x}px`,
+          top: `${menuPos.y}px`,
+          maxHeight: 'calc(100vh - 24px)',
+          overflowY: 'auto',
           zIndex: 99999
         }}
         className="w-52 bg-white/95 backdrop-blur-md border border-slate-200 rounded-2xl shadow-2xl py-1.5 text-xs text-slate-700 animate-in fade-in zoom-in-95 duration-100 select-none"
@@ -272,8 +306,10 @@ export const CanvasContextMenu: React.FC<CanvasContextMenuProps> = ({
       ref={menuRef}
       style={{
         position: 'fixed',
-        left: `${adjustedX}px`,
-        top: `${adjustedY}px`,
+        left: `${menuPos.x}px`,
+        top: `${menuPos.y}px`,
+        maxHeight: 'calc(100vh - 24px)',
+        overflowY: 'auto',
         zIndex: 99999
       }}
       className="w-56 bg-white/95 backdrop-blur-md border border-slate-200 rounded-2xl shadow-2xl py-1.5 text-xs text-slate-700 animate-in fade-in zoom-in-95 duration-100 select-none"
